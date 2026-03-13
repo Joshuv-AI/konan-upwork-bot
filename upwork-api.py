@@ -36,7 +36,8 @@ DATABASE_FILE = "konan_agent.db"
 SCAN_INTERVAL = 600
 MAX_CONNECTS_PER_DAY = 120
 MAX_PROPOSALS_PER_HOUR = 20
-DEFAULT_CONNECT_COST = 12
+MIN_CONNECT_COST = 0
+MAX_CONNECT_COST = 6
 MIN_SCORE_THRESHOLD = 6
 DEMO_TRIGGER_SCORE = 8
 TOP_DEMO_JOBS = 10
@@ -173,6 +174,12 @@ class Database:
 # UTILITIES
 # -----------------------
 
+import random
+
+def get_connect_cost():
+    """Return random connect cost between MIN and MAX (0-6)."""
+    return random.randint(MIN_CONNECT_COST, MAX_CONNECT_COST)
+
 def cosine_similarity(v1, v2):
     dot = sum(a*b for a,b in zip(v1,v2))
     norm1 = sqrt(sum(a*a for a in v1))
@@ -198,7 +205,7 @@ class Job:
     client_spend: Optional[float] = None
     client_rating: Optional[float] = None
     payment_verified: bool = False
-    connects_required: int = DEFAULT_CONNECT_COST
+    connects_required: int = 0
     proposal_count: int = 0
 
 # -----------------------
@@ -247,7 +254,8 @@ class JobFetcher:
                         id=job_id, title=title, description=description,
                         created=created, client_spend=client_spend,
                         client_rating=rating, payment_verified=verified,
-                        proposal_count=proposal_count
+                        proposal_count=proposal_count,
+                        connects_required=get_connect_cost()
                     ))
                 except Exception as e:
                     logger.warning(f"Job parsing failed: {e}")
@@ -603,23 +611,29 @@ def upload_to_gist(folder, job_title):
 # DISCORD ALERTS
 # -----------------------
 
-def send_discord_alert(job_title, score, tier, status, connects):
+def send_discord_alert(job_title, score, tier, status, connects, gist_url=None):
     """Send Discord alert for job actions."""
     if not DISCORD_WEBHOOK_URL:
         return
     
-    colors = {"tier1": 3066993, "tier2": 3447003, "tier3": 15105570}
+    colors = {"tier1": 3066993, "tier2": 3447003, "tier3": 15105570, "demo": 10181046}
+    color = colors.get(tier, colors.get("demo", 0))
+    
     embeds = [{
         "title": f"📋 Job Alert: {status}",
         "description": job_title[:100],
-        "color": colors.get(tier, 0),
+        "color": color,
         "fields": [
             {"name": "Score", "value": f"{score}/10", "inline": True},
-            {"name": "Tier", "value": tier, "inline": True},
+            {"name": "Tier" if tier in colors else "Template", "value": str(tier), "inline": True},
             {"name": "Connects", "value": str(connects), "inline": True}
         ],
         "timestamp": datetime.utcnow().isoformat()
     }]
+    
+    # Add gist URL if provided
+    if gist_url:
+        embeds[0]["fields"].append({"name": "Demo Gist", "value": gist_url, "inline": False})
     
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": embeds}, timeout=5)
@@ -819,6 +833,7 @@ class KonanBot:
             print("No jobs in review queue. Run scan first.")
             return
         
+        demo_count = 0
         for row in rows:
             job_id = row["id"]
             title = row["title"]
@@ -846,12 +861,54 @@ class KonanBot:
                 if gist_url:
                     print(f"✓ Demo built & uploaded!")
                     print(f"  Gist URL: {gist_url}")
+                    # Discord alert for demo
+                    send_discord_alert(title, row["score"], row["template_type"], "Demo Built", 0, gist_url)
                 else:
                     print(f"✓ Demo built (local: {demo_folder})")
+                    send_discord_alert(title, row["score"], row["template_type"], "Demo Built (Local)", 0, None)
             else:
                 print(f"✗ Demo build failed")
         
         print("\n=== DEMO BUILD COMPLETE ===")
+    
+    def show_stats(self):
+        """Show job/proposal stats."""
+        print("\n=== UPWORK BOT STATS ===\n")
+        
+        # Total jobs processed
+        self.db.cursor.execute("SELECT COUNT(*) as total FROM jobs")
+        total = self.db.cursor.fetchone()["total"]
+        
+        # Submitted proposals
+        self.db.cursor.execute("SELECT COUNT(*) as submitted FROM jobs WHERE proposals_sent > 0")
+        submitted = self.db.cursor.fetchone()["submitted"]
+        
+        # Queued jobs
+        self.db.cursor.execute("SELECT COUNT(*) as queued FROM jobs WHERE proposals_sent = 0")
+        queued = self.db.cursor.fetchone()["queued"]
+        
+        # By tier
+        self.db.cursor.execute("SELECT tier, COUNT(*) as count FROM jobs GROUP BY tier")
+        tiers = self.db.cursor.fetchall()
+        
+        # By template
+        self.db.cursor.execute("SELECT template_type, COUNT(*) as count FROM jobs WHERE template_type IS NOT NULL GROUP BY template_type")
+        templates = self.db.cursor.fetchall()
+        
+        # Connects used today
+        connects = self.db.connects_today()
+        
+        print(f"Total Jobs Processed: {total}")
+        print(f"Proposals Submitted: {submitted}")
+        print(f"Jobs in Queue: {queued}")
+        print(f"Connects Used Today: {connects}/{MAX_CONNECTS_PER_DAY}")
+        print(f"\nBy Tier:")
+        for t in tiers:
+            print(f"  {t['tier']}: {t['count']}")
+        print(f"\nBy Template:")
+        for t in templates:
+            print(f"  {t['template_type']}: {t['count']}")
+        print()
 
 # -----------------------
 # MAIN
@@ -862,10 +919,13 @@ import sys
 def main():
     bot = KonanBot()
     
-    # Check for --build-demo flag
-    if len(sys.argv) > 1 and sys.argv[1] == "--build-demo":
-        # Build demos for queued jobs
-        bot.build_demo_for_queued_jobs()
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--build-demo":
+            bot.build_demo_for_queued_jobs()
+        elif sys.argv[1] == "--stats":
+            bot.show_stats()
+        else:
+            print("Usage: python upwork-api.py [--build-demo|--stats]")
     else:
         # Normal scan loop
         while True:
