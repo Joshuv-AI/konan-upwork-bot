@@ -907,31 +907,138 @@ class ProposalAgent:
 
     @staticmethod
     def generate(job, keyword):
-        """Generate proposal - tries template first, falls back to generic."""
+        """Generate proposal - smarter template selection with fallback."""
 
-        # Try to find matching template
+        # Find matching template
         template_name, match_score = ProposalAgent.template_loader.find_matching_template(
             job.title, job.description
         )
 
-        if template_name and match_score > 0:
-            # Use template
+        # Only use template if match score is good (at least 2 keyword matches)
+        use_template = template_name and match_score >= 2
+
+        if use_template:
+            # Use template but personalize heavily
             proposal = ProposalAgent.template_loader.personalize_template(
                 template_name, job.title, job.description
             )
 
-            # Add custom question based on job
-            problem = ProposalAgent.extract_problem(job.description)
+            # Still extract and add job-specific details
+            details = ProposalAgent.extract_custom_details(job.description)
+
+            # Add specific observations from the job
+            specific_notes = []
+            if details.get('industry'):
+                specific_notes.append(f"I see you're working in the {details['industry']} space")
+            if details.get('tools'):
+                specific_notes.append(f"familiar with {details['tools']}")
+            if details.get('goal'):
+                specific_notes.append(f"and your main goal appears to be: {details['goal']}")
+
+            # Add job-specific question
             question = ProposalAgent.generate_question(job.description)
 
-            if question and question not in proposal:
+            if question:
                 proposal += f"\n\n{question}"
 
             logger.info(f"Using template: {template_name} (score: {match_score})")
             return proposal
 
-        # Fallback to generic proposal
+        # Fallback: Generate completely custom proposal based on job specifics
+        # No template - write from scratch using job details
+        logger.info(f"No good template match (score: {match_score}), generating custom proposal")
+
+        # Extract all job specifics for custom proposal
+        details = ProposalAgent.extract_custom_details(job.description)
         problem = ProposalAgent.extract_problem(job.description)
+
+        # Build custom proposal based on what's in the job posting
+        custom_intro = f"Hi,\n\nI noticed you're looking for help with {keyword}."
+        
+        if details.get('industry'):
+            custom_intro += f" Based on your posting, I can see you're in the {details['industry']} industry."
+        if details.get('goal'):
+            custom_intro += f" Your main goal seems to be: {details['goal']}."
+
+        # Build approach section based on detected needs
+        approach_points = []
+        if any(x in job.description.lower() for x in ['automate', 'automation', 'workflow']):
+            approach_points.append("1. Understand your current workflow and identify automation opportunities")
+        if any(x in job.description.lower() for x in ['data', 'extract', 'scrape']):
+            approach_points.append("1. Design data collection and extraction strategy")
+        if any(x in job.description.lower() for x in ['analyze', 'research', 'report']):
+            approach_points.append("1. Research and analyze based on your specific requirements")
+        if any(x in job.description.lower() for x in ['build', 'create', 'develop']):
+            approach_points.append("1. Build a solution tailored to your needs")
+        
+        # Default approach if no specific match
+        if not approach_points:
+            approach_points = [
+                "1. Review your requirements in detail",
+                "2. Propose a tailored solution",
+                "3. Execute to meet your specifications"
+            ]
+
+        approach = "\n".join(approach_points) + "\n\n4. Deliver and ensure you're satisfied with the result"
+
+        # Add specific question based on job
+        question = ProposalAgent.generate_question(job.description) or "What's your timeline for this project?"
+
+        proposal = f"""
+{custom_intro}
+
+From the description, the main goal appears to be:
+"{problem}"
+
+My approach:
+
+{approach}
+
+I've handled similar projects and can deliver quality results.
+
+Quick question:
+{question}
+
+Best,
+"""
+
+        return proposal.strip()
+
+    @staticmethod
+    def extract_custom_details(description):
+        """Extract specific details from job for custom proposals."""
+        text = description.lower()
+        details = {}
+
+        # Industry
+        industries = ['saas', 'tech', 'healthcare', 'finance', 'real estate', 'e-commerce', 'marketing', 'startup', 'retail', 'education']
+        for ind in industries:
+            if ind in text:
+                details['industry'] = ind
+                break
+
+        # Tools mentioned
+        tools = []
+        tool_names = ['python', 'javascript', 'excel', 'google sheets', 'zapier', 'hubspot', 'salesforce', 'shopify', 'wordpress']
+        for t in tool_names:
+            if t in text:
+                tools.append(t)
+        if tools:
+            details['tools'] = ', '.join(tools)
+
+        # Goal/objective
+        if 'automate' in text or 'automation' in text:
+            details['goal'] = 'automation'
+        elif 'data' in text or 'extract' in text:
+            details['goal'] = 'data extraction'
+        elif 'research' in text or 'analysis' in text:
+            details['goal'] = 'research/analysis'
+        elif 'build' in text or 'create' in text:
+            details['goal'] = 'build/create'
+        elif 'manage' in text or 'support' in text:
+            details['goal'] = 'ongoing management'
+
+        return details
 
         proposal = f"""
 Hi,
