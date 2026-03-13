@@ -1,43 +1,50 @@
 #!/usr/bin/env python3
 """
-Konan Upwork Agent (production-refined)
+Konan Upwork Agent - MERGED VERSION
+Combines optimizations + full template system
 
-Improvements:
-- Enhanced job scoring with client-quality inference (from RSS text signals)
-- Advanced proposal personalization (problem-aware, question-driven)
-- Stronger demo generator (creates realistic artifacts: CSV, script, README)
-- RSS optimization: extracts additional signals from description text
-- Job age filter, job prioritization tiers
-- Target job category filtering (easy/medium)
-- Connect spending control
-- Human review safeguard
+Features:
+- XML RSS parsing
+- Semantic deduplication
+- Rate limiting
+- Client quality signals
+- Competition scoring
+- 13 Templates with detection
+- Enhanced Demo Builder (template + skills = actual product)
+- Gist upload for demos
 """
 
 import os
-import re
-import json
-import time
 import uuid
-from datetime import datetime, timedelta
-from pathlib import Path
-
-# Import demo builder
-from demo_builder import DemoBuilder, create_demo
 import hashlib
 import sqlite3
 import logging
 import requests
-
+import xml.etree.ElementTree as ET
+import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
+from math import sqrt
 
-# ---------------------------------------
+# -----------------------
 # CONFIG
-# ---------------------------------------
+# -----------------------
 
-# Multiple RSS feeds for different keywords
-TARGET_KEYWORDS = [
+UPWORK_RSS_URL = "https://www.upwork.com/ab/feed/jobs/rss?q=assistant"
+DATABASE_FILE = "konan_agent.db"
+SCAN_INTERVAL = 600
+MAX_CONNECTS_PER_DAY = 120
+MAX_PROPOSALS_PER_HOUR = 20
+DEFAULT_CONNECT_COST = 12
+MIN_SCORE_THRESHOLD = 6
+DEMO_TRIGGER_SCORE = 8
+TOP_DEMO_JOBS = 10
+LOG_LEVEL = logging.INFO
+DISCORD_WEBHOOK_URL = ""  # Add your webhook URL
+
+# 13 Target Keywords
+TARGET_JOBS = [
     "research assistant",
     "lead generation",
     "data scraping",
@@ -55,166 +62,135 @@ TARGET_KEYWORDS = [
     "webhook",
 ]
 
-# Build RSS URLs for each keyword
-UPWORK_RSS_URLS = [f"https://www.upwork.com/ab/feed/jobs/rss?q={kw.replace(' ', '+')}" for kw in TARGET_KEYWORDS]
-
-DATABASE_FILE = "konan_agent.db"
-
-SCAN_INTERVAL = 600
-MAX_CONNECTS_PER_DAY = 120
-MAX_CONNECT_COST = 6  # Accept jobs costing 0-6 connects
-
-MIN_SCORE_THRESHOLD = 6
-DEMO_TRIGGER_SCORE = 8
-
-# Discord webhook for alerts
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1475680076589830300/"
-
-# Templates folder
-TEMPLATES_DIR = "templates"
-
-LOG_LEVEL = logging.INFO
-
-TARGET_JOBS = {
-    "easy": [
-        "research assistant",
-        "lead generation",
-        "data scraping",
-        "content repurposing",
-        "cold outreach",
-        "virtual assistant",
-    ],
-    "medium": [
-        "excel",
-        "google sheets",
-        "pdf",
-        "notion",
-        "data entry",
-        "email automation",
-        "social media",
-        "qa",
-        "webhook",
-    ],
+# Keyword synonyms
+KEYWORD_SYNONYMS = {
+    "lead generation": ["prospect list", "contact extraction", "email list building"],
+    "data scraping": ["web scraping", "data extraction"],
+    "virtual assistant": ["remote assistant", "admin support"],
+    "social media": ["social media management"],
 }
-
-# ---------------------------------------
-# LOGGING
-# ---------------------------------------
 
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger("konan")
 
-# ---------------------------------------
+# -----------------------
 # DATABASE
-# ---------------------------------------
+# -----------------------
 
 class Database:
 
     def __init__(self):
-
         self.conn = sqlite3.connect(DATABASE_FILE)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
-
         self.initialize()
 
     def initialize(self):
-
         self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS jobs(
-            id TEXT PRIMARY KEY,
-            title TEXT,
-            description TEXT,
-            score REAL,
-            tier TEXT,
-            connects INTEGER,
-            created_at TEXT,
-            status TEXT DEFAULT 'submitted'
-        )
+            CREATE TABLE IF NOT EXISTS jobs(
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                description TEXT,
+                score REAL,
+                tier TEXT,
+                connects INTEGER,
+                created_at TEXT,
+                client_spend REAL,
+                client_rating REAL,
+                payment_verified INTEGER,
+                proposals_sent INTEGER,
+                proposals_accepted INTEGER,
+                hired INTEGER,
+                vector TEXT,
+                template_type TEXT
+            )
         """)
-
         self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS connect_spend(
-            date TEXT PRIMARY KEY,
-            connects_used INTEGER
-        )
+            CREATE TABLE IF NOT EXISTS connect_spend(
+                date TEXT PRIMARY KEY,
+                connects_used INTEGER
+            )
         """)
-
-        # Proposal status tracking
-        self.cursor.execute("""
-        CREATE TABLE IF NOT EXISTS proposal_status(
-            job_id TEXT PRIMARY KEY,
-            status TEXT,
-            template_type TEXT,
-            updated_at TEXT
-        )
-        """)
-
         self.conn.commit()
 
     def job_exists(self, job_id):
-
         self.cursor.execute("SELECT id FROM jobs WHERE id=?", (job_id,))
         return self.cursor.fetchone() is not None
 
-    def save_job(self, job_id, title, description, score, tier, connects):
-
+    def save_job(self, job, tier, score, vector, template_type=None):
         self.cursor.execute("""
-        INSERT OR REPLACE INTO jobs
-        VALUES(?,?,?,?,?,?,?)
+            INSERT OR REPLACE INTO jobs(
+                id, title, description, score, tier, connects, created_at,
+                client_spend, client_rating, payment_verified, proposals_sent,
+                proposals_accepted, hired, vector, template_type
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            job_id,
-            title,
-            description,
-            score,
-            tier,
-            connects,
-            datetime.utcnow().isoformat()
+            job.id, job.title, job.description, score, tier,
+            job.connects_required, datetime.utcnow().isoformat(),
+            job.client_spend, job.client_rating, int(job.payment_verified),
+            0, 0, 0, vector, template_type
         ))
-
         self.conn.commit()
 
     def connects_today(self):
-
         today = datetime.utcnow().date().isoformat()
-
-        self.cursor.execute(
-            "SELECT connects_used FROM connect_spend WHERE date=?",
-            (today,)
-        )
-
+        self.cursor.execute("SELECT connects_used FROM connect_spend WHERE date=?", (today,))
         row = self.cursor.fetchone()
-
         return row["connects_used"] if row else 0
 
     def add_connects(self, amount):
-
         today = datetime.utcnow().date().isoformat()
         used = self.connects_today()
-
         self.cursor.execute("""
-        INSERT OR REPLACE INTO connect_spend
-        VALUES(?,?)
+            INSERT OR REPLACE INTO connect_spend(date, connects_used)
+            VALUES(?, ?)
         """, (today, used + amount))
-
         self.conn.commit()
 
-    def update_proposal_status(self, job_id, status):
-
+    def update_proposal_feedback(self, job_id, accepted=False, hired=False):
         self.cursor.execute("""
-        INSERT OR REPLACE INTO proposal_status
-        VALUES(?,?,?)
-        """, (job_id, status, datetime.utcnow().isoformat()))
-
+            UPDATE jobs
+            SET proposals_sent = proposals_sent + 1,
+                proposals_accepted = proposals_accepted + ?,
+                hired = hired + ?
+            WHERE id = ?
+        """, (int(accepted), int(hired), job_id))
         self.conn.commit()
 
-# ---------------------------------------
+    def is_semantic_duplicate(self, vector, threshold=0.9):
+        self.cursor.execute("SELECT vector FROM jobs WHERE vector IS NOT NULL")
+        for row in self.cursor.fetchall():
+            try:
+                existing_vec = list(map(float, row["vector"].split(",")))
+                sim = cosine_similarity(existing_vec, vector)
+                if sim > threshold:
+                    return True
+            except:
+                pass
+        return False
+
+# -----------------------
+# UTILITIES
+# -----------------------
+
+def cosine_similarity(v1, v2):
+    dot = sum(a*b for a,b in zip(v1,v2))
+    norm1 = sqrt(sum(a*a for a in v1))
+    norm2 = sqrt(sum(b*b for b in v2))
+    return dot / (norm1*norm2 + 1e-8)
+
+def text_to_vector(text, dim=50):
+    vec = [0]*dim
+    for i, c in enumerate(text):
+        vec[i%dim] += ord(c)
+    return vec
+
+# -----------------------
 # DATA MODEL
-# ---------------------------------------
+# -----------------------
 
 @dataclass
 class Job:
-
     id: str
     title: str
     description: str
@@ -222,1108 +198,583 @@ class Job:
     client_spend: Optional[float] = None
     client_rating: Optional[float] = None
     payment_verified: bool = False
-    connects_required: int = MAX_CONNECT_COST
+    connects_required: int = DEFAULT_CONNECT_COST
+    proposal_count: int = 0
 
-# ---------------------------------------
-# JOB FETCHER (RSS optimized)
-# ---------------------------------------
+# -----------------------
+# JOB FETCHER (XML)
+# -----------------------
 
 class JobFetcher:
 
     @staticmethod
     def fetch():
-
         jobs: List[Job] = []
-
-        # Fetch from all keyword RSS feeds
-        for rss_url in UPWORK_RSS_URLS:
-            try:
-                response = requests.get(rss_url, timeout=10)
-                rss = response.text
-
-                items = rss.split("<item>")[1:]
-
-                for item in items:
-
-                    title_match = re.search("<title>(.*?)</title>", item)
-                    desc_match = re.search("<description>(.*?)</description>", item)
-                    pub_match = re.search("<pubDate>(.*?)</pubDate>", item)
-
-                    if not title_match:
-                        continue
-
-                    title = title_match.group(1).lower()
-                    description = desc_match.group(1).lower() if desc_match else ""
-
+        try:
+            response = requests.get(UPWORK_RSS_URL, timeout=10)
+            root = ET.fromstring(response.content)
+            for item in root.findall(".//item"):
+                try:
+                    title = item.findtext("title", "").lower()
+                    description = item.findtext("description", "").lower()
+                    pub_date = item.findtext("pubDate")
                     created = datetime.utcnow()
-
-                    if pub_match:
+                    if pub_date:
                         try:
-                            created = datetime.strptime(
-                                pub_match.group(1)[:25],
-                                "%a, %d %b %Y %H:%M:%S"
-                            )
+                            created = datetime.strptime(pub_date[:25], "%a, %d %b %Y %H:%M:%S")
                         except:
                             pass
 
                     client_spend = None
                     rating = None
                     verified = False
+                    proposal_count = 0
 
                     spend_match = re.search(r"\$([0-9,]+)\s+spent", description)
                     if spend_match:
                         client_spend = float(spend_match.group(1).replace(",", ""))
-
                     rating_match = re.search(r"([0-5]\.[0-9])\s+rating", description)
                     if rating_match:
                         rating = float(rating_match.group(1))
-
                     if "payment verified" in description:
                         verified = True
+                    proposal_match = re.search(r"(\d+)\s+proposals", description)
+                    if proposal_match:
+                        proposal_count = int(proposal_match.group(1))
 
-                    job_id = hashlib.sha256(
-                        (title + description).encode()
-                    ).hexdigest()[:32]
-
-                    jobs.append(
-                        Job(
-                            job_id,
-                            title,
-                            description,
-                            created,
-                            client_spend,
-                            rating,
-                            verified,
-                            MAX_CONNECT_COST  # Max connects we're willing to use
-                        )
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to fetch {rss_url}: {e}")
-
+                    job_id = hashlib.sha256((title + description).encode()).hexdigest()[:32]
+                    jobs.append(Job(
+                        id=job_id, title=title, description=description,
+                        created=created, client_spend=client_spend,
+                        client_rating=rating, payment_verified=verified,
+                        proposal_count=proposal_count
+                    ))
+                except Exception as e:
+                    logger.warning(f"Job parsing failed: {e}")
+        except Exception as e:
+            logger.error(f"RSS fetch failed: {e}")
         return jobs
 
-# ---------------------------------------
+# -----------------------
 # JOB PARSER
-# ---------------------------------------
+# -----------------------
 
 class JobParser:
 
-    @staticmethod
-    def categorize(job):
+    def __init__(self):
+        self.keywords = TARGET_JOBS
 
-        for level, keywords in TARGET_JOBS.items():
+    def categorize(self, job):
+        text = (job.title + " " + job.description).lower()
+        for key in self.keywords:
+            if key in text:
+                return key
+        return None
 
-            for keyword in keywords:
-
-                if keyword in job.title:
-                    return level, keyword
-
-        return None, None
-
-# ---------------------------------------
+# -----------------------
 # JOB SCORING
-# ---------------------------------------
+# -----------------------
 
 class JobScorer:
 
     @staticmethod
     def age_minutes(job):
-
         return (datetime.utcnow() - job.created).total_seconds() / 60
 
     @staticmethod
-    def score(job, category):
-
+    def score(job, keyword):
         score = 5
-
         age = JobScorer.age_minutes(job)
+        if age < 15: score += 4
+        elif age < 60: score += 2
+        elif age < 120: score += 1
 
-        if age < 30:
-            score += 3
-        elif age < 120:
-            score += 1
+        if job.payment_verified: score += 1
+        if job.client_rating and job.client_rating > 4.5: score += 1
+        if job.client_spend and job.client_spend > 1000: score += 1
+        if job.proposal_count > 20: score -= 2
 
-        if category == "easy":
-            score += 1
+        return min(max(score, 0), 10)
 
-        if category == "medium":
-            score += 2
-
-        if job.payment_verified:
-            score += 1
-
-        if job.client_rating and job.client_rating > 4.5:
-            score += 1
-
-        if job.client_spend and job.client_spend > 1000:
-            score += 1
-
-        return min(score, 10)
-
-# ---------------------------------------
+# -----------------------
 # PRIORITIZATION
-# ---------------------------------------
+# -----------------------
 
 class JobPrioritizer:
 
     @staticmethod
     def tier(score):
-
-        if score >= 9:
-            return "tier1"
-
-        if score >= 7:
-            return "tier2"
-
+        if score >= 9: return "tier1"
+        if score >= 7: return "tier2"
         return "tier3"
 
-# ---------------------------------------
-# DEMO GENERATOR (stronger)
-# ---------------------------------------
+# -----------------------
+# TEMPLATE DETECTION
+# -----------------------
 
-class DemoGenerator:
+TEMPLATE_KEYWORDS = {
+    "lead_generation": ["lead generation", "prospect list", "b2b leads"],
+    "data_scraping": ["data scraping", "web scraping", "data extraction"],
+    "research_assistant": ["research assistant", "market research"],
+    "webhook_automation": ["webhook", "automation", "zapier"],
+    "cold_outreach": ["cold outreach", "cold email", "email outreach"],
+    "excel_sheets": ["excel", "google sheets", "spreadsheet", "dashboard"],
+    "virtual_assistant": ["virtual assistant", "admin support"],
+    "notion_setup": ["notion", "notion setup"],
+    "qa_testing": ["qa testing", "quality assurance"],
+    "email_automation": ["email automation", "mailchimp"],
+    "social_media": ["social media", "instagram", "tiktok"],
+    "content_repurposing": ["content repurposing", "repurpose"],
+    "pdf_services": ["pdf", "ocr"],
+}
 
+def detect_template(job_title, job_description):
+    """Detect which template matches this job."""
+    text = (job_title + " " + job_description).lower()
+    best_match = None
+    best_score = 0
+    
+    for template, keywords in TEMPLATE_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in text)
+        if score > best_score:
+            best_score = score
+            best_match = template
+    
+    return best_match if best_score >= 1 else None
+
+# -----------------------
+# ENHANCED DEMO BUILDER
+# -----------------------
+
+class EnhancedDemoBuilder:
+    """Builds demos using template + skills = actual product."""
+    
+    IMPROVERS = {
+        "lead_generation": True,
+        "data_scraping": True,
+        "research_assistant": True,
+        "webhook_automation": True,
+        "cold_outreach": True,
+        "excel_sheets": True,
+        "virtual_assistant": True,
+        "notion_setup": True,
+        "qa_testing": True,
+        "email_automation": True,
+        "social_media": True,
+        "content_repurposing": True,
+        "pdf_services": True,
+    }
+    
     ROOT = "demos"
-
+    
     @staticmethod
-    def generate(job):
-
-        os.makedirs(DemoGenerator.ROOT, exist_ok=True)
-
-        folder = os.path.join(
-            DemoGenerator.ROOT,
-            uuid.uuid4().hex[:8]
-        )
-
-        os.makedirs(folder)
-
-        # sample dataset
-        csv_path = os.path.join(folder, "sample_output.csv")
-
+    def generate(job, template_type):
+        folder = None
+        try:
+            os.makedirs(EnhancedDemoBuilder.ROOT, exist_ok=True)
+            folder = os.path.join(EnhancedDemoBuilder.ROOT, uuid.uuid4().hex[:8])
+            os.makedirs(folder)
+            
+            # Generate based on template type
+            if template_type == "lead_generation":
+                EnhancedDemoBuilder._build_lead_gen(job, folder)
+            elif template_type == "data_scraping":
+                EnhancedDemoBuilder._build_scraper(job, folder)
+            elif template_type == "excel_sheets":
+                EnhancedDemoBuilder._build_spreadsheet(job, folder)
+            elif template_type == "qa_testing":
+                EnhancedDemoBuilder._build_qa(job, folder)
+            else:
+                EnhancedDemoBuilder._build_generic(job, folder)
+            
+        except Exception as e:
+            logger.warning(f"Demo generation failed: {e}")
+        return folder
+    
+    @staticmethod
+    def _build_lead_gen(job, folder):
+        # CSV with sample data
+        csv_path = os.path.join(folder, "sample_leads.csv")
         with open(csv_path, "w") as f:
-            f.write("name,email\nexample,test@example.com\n")
-
-        # script example
-        script_path = os.path.join(folder, "example_script.py")
-
+            f.write("company,contact,email,phone,title,industry,status,notes\n")
+            f.write("Acme Corp,John Smith,john@acme.com,555-0101,CEO,Tech,New,\n")
+            f.write("TechStart,Jane Doe,jane@techstart.io,555-0102,CTO,SaaS,Contacted,\n")
+        
+        # Script with validation
+        script_path = os.path.join(folder, "lead_validation.py")
         with open(script_path, "w") as f:
-            f.write("""
+            f.write("""#!/usr/bin/env python3
+# Lead Validation Script
+import re
+
+def validate_email(email):
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, email))
+
+def validate_phone(phone):
+    digits = re.sub(r'\\D', '', phone)
+    return len(digits) == 10
+
+# Example usage:
+# leads = load_csv('sample_leads.csv')
+# for lead in leads:
+#     if validate_email(lead['email']):
+#         print(f"Valid: {lead['email']}")
+""")
+        
+        # README
+        readme = os.path.join(folder, "README.md")
+        with open(readme, "w") as f:
+            f.write(f"# Demo for: {job.title}\n\n")
+            f.write("## Files\n")
+            f.write("- sample_leads.csv - Sample lead data\n")
+            f.write("- lead_validation.py - Email/phone validation script\n\n")
+            f.write("## Features\n")
+            f.write("- Email validation function\n")
+            f.write("- Phone validation function\n")
+            f.write("- Ready to customize for your needs\n")
+    
+    @staticmethod
+    def _build_scraper(job, folder):
+        script_path = os.path.join(folder, "scraper.py")
+        with open(script_path, "w") as f:
+            f.write(f"""#!/usr/bin/env python3
+# Web Scraper Demo - {job.title}
+import requests
+from bs4 import BeautifulSoup
 import csv
 
-data=[["name","email"],["example","test@example.com"]]
+URL = "https://example.com"  # Customize URL
 
-with open("sample_output.csv","w") as f:
-    writer=csv.writer(f)
-    writer.writerows(data)
+def scrape_data(url):
+    headers = {{'User-Agent': 'Mozilla/5.0'}}
+    response = requests.get(url, headers=headers, timeout=10)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    
+    items = []
+    # Add your selectors here
+    # for item in soup.select('.item-class'):
+    #     items.append({{'title': item.get_text()}})
+    
+    return items
 
-print("Demo dataset generated")
+def save_csv(data, filename='output.csv'):
+    if not data:
+        return
+    with open(filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=data[0].keys())
+        writer.writeheader()
+        writer.writerows(data)
+
+if __name__ == "__main__":
+    data = scrape_data(URL)
+    save_csv(data)
+    print(f"Scraped {{len(data)}} items")
 """)
-
+        
         readme = os.path.join(folder, "README.md")
-
         with open(readme, "w") as f:
-
-            f.write(f"""
-Demo for: {job.title}
-
-This demo shows a simple working example output similar
-to what the final deliverable could look like.
-
-Files:
-- example_script.py
-- sample_output.csv
-""")
-
-        return folder
-
-# ---------------------------------------
-# GIST UPLOADER (for demo sharing)
-# ---------------------------------------
-
-class GistUploader:
-
-    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-
+            f.write(f"# Demo for: {job.title}\n\n")
+            f.write("## Customizable\n")
+            f.write("- Set your target URL\n")
+            f.write("- Add CSS selectors for your data\n")
+            f.write("- Run and get CSV output\n")
+    
     @staticmethod
-    def upload_demo(demo_folder):
+    def _build_spreadsheet(job, folder):
+        csv_path = os.path.join(folder, "sample_data.csv")
+        with open(csv_path, "w") as f:
+            f.write("item,quantity,price,total,status,notes\n")
+            f.write("Product A,10,25.00,250.00,Active,\n")
+            f.write("Service B,5,100.00,500.00,Pending,\n")
+        
+        formulas_path = os.path.join(folder, "formulas.txt")
+        with open(formulas_path, "w") as f:
+            f.write("""# Google Sheets Formulas
 
-        if not GistUploader.GITHUB_TOKEN:
-            logger.warning("No GITHUB_TOKEN set, returning local folder")
-            return demo_folder
+# Total calculation
+=E2*B2
 
-        try:
-            files = {}
-            for filename in os.listdir(demo_folder):
-                filepath = os.path.join(demo_folder, filename)
-                if os.path.isfile(filepath):
-                    with open(filepath, 'r') as f:
-                        files[filename] = {"content": f.read()}
+# Email validation
+=ISEMAIL(C2)
 
-            gist_data = {
-                "description": f"Demo for Upwork proposal - {datetime.now().date()}",
+# Status indicator
+=IF(F2="Active", "✅", "❌")
+
+# Date
+=TODAY()
+
+# VLOOKUP example
+=IFERROR(VLOOKUP(A2, lookup_sheet!A:B, 2, FALSE), "N/A")
+""")
+        
+        readme = os.path.join(folder, "README.md")
+        with open(readme, "w") as f:
+            f.write(f"# Demo for: {job.title}\n\n")
+            f.write("## Files\n")
+            f.write("- sample_data.csv - Sample data\n")
+            f.write("- formulas.txt - Google Sheets formulas\n")
+    
+    @staticmethod
+    def _build_qa(job, folder):
+        testcases_path = os.path.join(folder, "test_cases.md")
+        with open(testcases_path, "w") as f:
+            f.write(f"""# Test Cases - {job.title}
+
+## Test Case Template
+
+| ID | Feature | Test Case | Steps | Expected Result | Status |
+|----|---------|-----------|-------|-----------------|--------|
+| TC01 | | | | | Not Run |
+| TC02 | | | | | Not Run |
+
+## Bug Report Template
+
+| ID | Title | Severity | Steps to Reproduce | Expected | Actual |
+|----|-------|-----------|---------------------|----------|---------|
+| BUG01 | | | | | |
+
+## Test Data
+- Add test data here
+""")
+        
+        readme = os.path.join(folder, "README.md")
+        with open(readme, "w") as f:
+            f.write(f"# Demo for: {job.title}\n\n")
+            f.write("## What's Included\n")
+            f.write("- Test case template\n")
+            f.write("- Bug report template\n")
+            f.write("- Test data section\n")
+    
+    @staticmethod
+    def _build_generic(job, folder):
+        readme = os.path.join(folder, "README.md")
+        with open(readme, "w") as f:
+            f.write(f"# Demo for: {job.title}\n\n")
+            f.write("Demo files generated based on job requirements.\n")
+            f.write("Customize for your specific needs.\n")
+
+# -----------------------
+# GIST UPLOAD
+# -----------------------
+
+def upload_to_gist(folder, job_title):
+    """Upload demo folder to GitHub Gist."""
+    import base64
+    
+    gist_token = os.environ.get("GITHUB_TOKEN", "")
+    if not gist_token:
+        return None
+    
+    files = {}
+    try:
+        for filename in os.listdir(folder):
+            filepath = os.path.join(folder, filename)
+            if os.path.isfile(filepath):
+                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                    files[filename] = {"content": f.read()}
+    except:
+        return None
+    
+    if not files:
+        return None
+    
+    try:
+        response = requests.post(
+            "https://api.github.com/gists",
+            headers={
+                "Authorization": f"token {gist_token}",
+                "Accept": "application/vnd.github+json"
+            },
+            json={
+                "description": f"Demo: {job_title}",
                 "public": False,
                 "files": files
             }
-
-            response = requests.post(
-                "https://api.github.com/gists",
-                headers={
-                    "Authorization": f"token {GistUploader.GITHUB_TOKEN}",
-                    "Accept": "application/vnd.github+json"
-                },
-                json=gist_data
-            )
-
-            if response.status_code == 201:
-                return response.json()["html_url"]
-            else:
-                logger.warning(f"Gist upload failed: {response.status_code}")
-                return demo_folder
-
-        except Exception as e:
-            logger.warning(f"Gist upload error: {e}")
-            return demo_folder
-
-# ---------------------------------------
-# DISCORD NOTIFIER
-# ---------------------------------------
-
-class DiscordNotifier:
-
-    @staticmethod
-    def send_alert(job_title, score, tier, proposal_preview):
-
-        if not DISCORD_WEBHOOK_URL:
-            return
-
-        embed = {
-            "title": f"New Job Alert - {job_title[:50]}...",
-            "color": 3447003,  # Blue
-            "fields": [
-                {"name": "Score", "value": str(score), "inline": True},
-                {"name": "Tier", "value": tier, "inline": True},
-            ],
-            "footer": {"text": "Konan Upwork Bot"}
-        }
-
-        payload = {
-            "embeds": [embed]
-        }
-
-        try:
-            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-        except Exception as e:
-            logger.warning(f"Discord alert failed: {e}")
-
-# ---------------------------------------
-# TEMPLATE LOADER
-# ---------------------------------------
-
-class TemplateLoader:
-
-    def __init__(self, templates_dir=TEMPLATES_DIR):
-        self.templates_dir = templates_dir
-        self.templates = {}
-        self.load_templates()
-
-    def load_templates(self):
-        """Load all templates from the templates folder."""
-        if not os.path.exists(self.templates_dir):
-            logger.warning(f"Templates directory {self.templates_dir} not found")
-            return
-
-        for filename in os.listdir(self.templates_dir):
-            if filename.endswith('.md'):
-                template_name = filename[:-3]  # Remove .md
-                filepath = os.path.join(self.templates_dir, filename)
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    self.templates[template_name] = content
-                    logger.info(f"Loaded template: {template_name}")
-
-    def find_matching_template(self, job_title, job_description):
-        """Find best matching template based on keywords."""
-        text = (job_title + " " + job_description).lower()
-
-        best_match = None
-        best_score = 0
-
-        for template_name, content in self.templates.items():
-            # Extract keywords from template
-            keywords_section = content.split("## Category Keywords")[-1].split("---")[0] if "## Category Keywords" in content else ""
-
-            score = 0
-            for keyword in keywords_section.split('\n'):
-                keyword = keyword.strip('- ').strip()
-                if keyword and keyword in text:
-                    score += 1
-
-            if score > best_score:
-                best_score = score
-                best_match = template_name
-
-        return best_match, best_score
-
-    def get_short_template(self, template_name):
-        """Get the short version (for proposals)."""
-        if template_name not in self.templates:
-            return None
-
-        content = self.templates[template_name]
-
-        # Extract SHORT VERSION section
-        if "## SHORT VERSION" in content:
-            short = content.split("## SHORT VERSION")[-1].split("## LONG VERSION")[0]
-            return short.strip()
-
-        return content  # Fallback to full content
-
-    def personalize_template(self, template_name, job_title, job_description):
-        """Personalize template with job-specific details."""
-        template = self.get_short_template(template_name)
-
-        if not template:
-            return None
-
-        # Extract job-specific details
-        details = self.extract_details(job_title, job_description)
-
-        # Replace placeholders
-        personalized = template
-        for key, value in details.items():
-            personalized = personalized.replace(f"[CUSTOMIZE: {key}]", value)
-
-        # Remove any remaining [CUSTOMIZE: ...] placeholders
-        personalized = re.sub(r'\[CUSTOMIZE: [^\]]+\]', '[Your specifics here]', personalized)
-
-        return personalized
-
-    def extract_details(self, job_title, job_description):
-        """Extract specific details from job to customize template."""
-        text = (job_title + " " + job_description).lower()
-
-        details = {}
-
-        # ==== Lead Generation specific ====
-        industries = ['saas', 'tech', 'healthcare', 'finance', 'real estate', 'e-commerce', 'marketing', 'startup']
-        for ind in industries:
-            if ind in text:
-                details['industry/target audience'] = ind
-                break
-
-        # Company size
-        if 'enterprise' in text or '500+' in text:
-            details['company size'] = 'enterprise (500+)'
-        elif '100-500' in text:
-            details['company size'] = 'mid-market (100-500)'
-        elif '50-100' in text:
-            details['company size'] = 'SMB (50-100)'
-
-        # Tools
-        tools = ['salesforce', 'hubspot', 'linkedin', 'zoominfo', 'clearbit', 'hunter', 'apollo']
-        found_tools = [t for t in tools if t in text]
-        if found_tools:
-            details['tools mentioned'] = ', '.join(found_tools)
-
-        # ==== Data Scraping specific ====
-        # Target website
-        url_match = re.search(r'(https?://[^\s]+|www\.[^\s]+)', job_title + " " + job_description)
-        if url_match:
-            details['target website'] = url_match.group(1)[:50]
-
-        # Data points needed
-        data_points = []
-        if 'email' in text:
-            data_points.append('emails')
-        if 'phone' in text or 'contact' in text:
-            data_points.append('phone numbers')
-        if 'company' in text:
-            data_points.append('company info')
-        if 'price' in text or 'cost' in text:
-            data_points.append('pricing')
-        if 'product' in text:
-            data_points.append('product details')
-        if data_points:
-            details['data points needed'] = ', '.join(data_points)
-
-        # Scraping type
-        if 'dynamic' in text or 'javascript' in text or 'js' in text:
-            details['site type'] = 'dynamic JavaScript site'
-        elif 'api' in text:
-            details['site type'] = 'API extraction'
-        else:
-            details['site type'] = 'standard website'
-
-        # Volume
-        if '1000' in text or '1k' in text:
-            details['expected volume'] = '1,000+ records'
-        elif '5000' in text or '5k' in text:
-            details['expected volume'] = '5,000+ records'
-        elif '10000' in text or '10k' in text:
-            details['expected volume'] = '10,000+ records'
-
-        # ==== Research Assistant specific ====
-        research_types = []
-        if 'market research' in text:
-            research_types.append('market research')
-        if 'competitor' in text or 'competitive' in text:
-            research_types.append('competitor analysis')
-        if 'due diligence' in text:
-            research_types.append('due diligence')
-        if 'industry' in text:
-            research_types.append('industry research')
-        if 'company' in text or 'company profile' in text:
-            research_types.append('company research')
-        if 'academic' in text or 'literature' in text:
-            research_types.append('academic research')
-        if research_types:
-            details['research type'] = ', '.join(research_types)
-
-        # Research depth
-        if 'deep' in text or 'comprehensive' in text or 'extensive' in text:
-            details['research depth'] = 'comprehensive'
-        elif 'quick' in text or 'brief' in text or 'overview' in text:
-            details['research depth'] = 'overview'
-        else:
-            details['research depth'] = 'standard'
-
-        # ==== Common deliverable format ====
-        if 'csv' in text:
-            details['deliverable format'] = 'CSV'
-        if 'google sheet' in text:
-            details['deliverable format'] = 'Google Sheets'
-        if 'airtable' in text:
-            details['deliverable format'] = 'Airtable'
-        if 'json' in text:
-            details['deliverable format'] = 'JSON'
-
-        # ==== Webhook/Automation specific ====
-        # Platforms mentioned
-        platforms = []
-        if 'zapier' in text:
-            platforms.append('Zapier')
-        if 'make' in text or 'integromat' in text:
-            platforms.append('Make')
-        if 'n8n' in text:
-            platforms.append('n8n')
-        if 'hubspot' in text:
-            platforms.append('HubSpot')
-        if 'salesforce' in text:
-            platforms.append('Salesforce')
-        if 'slack' in text:
-            platforms.append('Slack')
-        if 'google sheet' in text or 'gsheets' in text:
-            platforms.append('Google Sheets')
-        if platforms:
-            details['platforms'] = ', '.join(platforms)
-
-        # Automation type
-        if 'crm' in text or 'lead' in text:
-            details['automation type'] = 'CRM/lead automation'
-        elif 'data sync' in text or 'sync' in text:
-            details['automation type'] = 'data synchronization'
-        elif 'webhook' in text:
-            details['automation type'] = 'webhook processing'
-        elif 'api' in text:
-            details['automation type'] = 'API integration'
-        else:
-            details['automation type'] = 'workflow automation'
-
-        # Complexity
-        if 'complex' in text or 'multiple' in text or 'enterprise' in text:
-            details['complexity'] = 'advanced'
-        elif 'simple' in text or 'basic' in text:
-            details['complexity'] = 'simple'
-        else:
-            details['complexity'] = 'standard'
-
-        # ==== Cold Outreach specific ====
-        if 'cold' in text or 'outreach' in text or 'email' in text or 'outbound' in text:
-            details['campaign type'] = 'cold outreach'
-
-        # Outreach channel
-        if 'linkedin' in text:
-            details['channel'] = 'LinkedIn'
-        elif 'email' in text or 'cold' in text or 'outreach' in text:
-            details['channel'] = 'email'
-        if 'multi' in text or 'both' in text:
-            details['channel'] = 'multi-channel'
-
-        # Campaign goal
-        if 'meeting' in text:
-            details['goal'] = 'book meetings'
-        elif 'lead' in text:
-            details['goal'] = 'generate leads'
-        elif 'pipeline' in text:
-            details['goal'] = 'build pipeline'
-        elif 'demo' in text:
-            details['goal'] = 'book demos'
-
-        # ==== Excel/Sheets specific ====
-        if 'excel' in text or 'spreadsheet' in text or 'google sheet' in text or 'dashboard' in text:
-            details['platform'] = 'Excel/Google Sheets'
-            details['project type'] = 'spreadsheet/dashboard'
-
-        # Use case detection
-        if 'financial' in text or 'finance' in text or 'p&l' in text or 'cash flow' in text:
-            details['use case'] = 'financial model'
-        elif 'budget' in text or 'tracking' in text:
-            details['use case'] = 'budget/tracker'
-        elif 'project' in text:
-            details['use case'] = 'project management'
-        elif 'sales' in text or 'crm' in text:
-            details['use case'] = 'sales/CRM'
-        elif 'inventory' in text:
-            details['use case'] = 'inventory'
-        elif 'analytics' in text or 'dashboard' in text:
-            details['use case'] = 'analytics/dashboard'
-        else:
-            details['use case'] = 'spreadsheet automation'
-
-        # ==== Virtual Assistant specific ====
-        va_keywords = ['virtual assistant', 'va', 'executive assistant', 'administrative', 'calendar management', 'inbox', 'admin support']
-        if any(kw in text for kw in va_keywords):
-            details['service type'] = 'virtual assistant'
-
-        # VA specialization
-        if 'executive' in text or 'ceo' in text or 'c-suite' in text:
-            details['va specialization'] = 'executive assistant'
-        elif 'real estate' in text:
-            details['va specialization'] = 'real estate VA'
-        elif 'tech' in text or 'startup' in text or 'saas' in text:
-            details['va specialization'] = 'tech startup VA'
-        elif 'ecommerce' in text or 'e-commerce' in text or 'shopify' in text:
-            details['va specialization'] = 'e-commerce VA'
-        elif 'sales' in text or 'crm' in text:
-            details['va specialization'] = 'sales VA'
-
-        # ==== Notion specific ====
-        if 'notion' in text:
-            details['service type'] = 'notion setup'
-            details['project type'] = 'Notion workspace'
-
-        # Notion specific needs
-        if 'database' in text or 'relation' in text or 'rollup' in text:
-            details['notion feature'] = 'database design'
-        elif 'template' in text:
-            details['notion feature'] = 'template creation'
-        elif 'migration' in text or 'migrate' in text:
-            details['notion feature'] = 'migration'
-        elif 'automation' in text or 'zapier' in text:
-            details['notion feature'] = 'automation'
-        elif 'api' in text or 'integration' in text:
-            details['notion feature'] = 'API/integration'
-
-        # ==== QA Testing specific ====
-        qa_keywords = ['qa', 'testing', 'test', 'quality assurance', 'bug', 'test automation', 'manual testing']
-        if any(kw in text for kw in qa_keywords):
-            details['service type'] = 'qa testing'
-
-        # Testing type
-        if 'automation' in text or 'automated' in text:
-            details['testing type'] = 'test automation'
-        elif 'manual' in text:
-            details['testing type'] = 'manual testing'
-        elif 'performance' in text or 'load' in text:
-            details['testing type'] = 'performance testing'
-        elif 'security' in text or 'penetration' in text:
-            details['testing type'] = 'security testing'
-        elif 'mobile' in text or 'ios' in text or 'android' in text:
-            details['testing type'] = 'mobile testing'
-        elif 'api' in text:
-            details['testing type'] = 'api testing'
-
-        # ==== Email Automation specific ====
-        email_keywords = ['email', 'mailchimp', 'klaviyo', 'hubspot', 'sendgrid', 'marketing email', 'newsletter', 'drip']
-        if any(kw in text for kw in email_keywords):
-            details['service type'] = 'email automation'
-
-        # Email type
-        if 'marketing' in text:
-            details['email type'] = 'marketing'
-        elif 'transactional' in text:
-            details['email type'] = 'transactional'
-        elif 'newsletter' in text:
-            details['email type'] = 'newsletter'
-
-        # ==== Social Media specific ====
-        social_keywords = ['social media', 'instagram', 'tiktok', 'linkedin', 'twitter', 'facebook', 'content calendar', 'community']
-        if any(kw in text for kw in social_keywords):
-            details['service type'] = 'social media management'
-
-        # Platform
-        if 'instagram' in text:
-            details['platform'] = 'Instagram'
-        elif 'tiktok' in text:
-            details['platform'] = 'TikTok'
-        elif 'linkedin' in text:
-            details['platform'] = 'LinkedIn'
-        elif 'twitter' in text or 'x.com' in text:
-            details['platform'] = 'Twitter/X'
-
-        # ==== Content Repurposing specific ====
-        repurp_keywords = ['repurpos', 'content repurpos', 'video repurpos', 'podcast', 'atomize', 'long-form']
-        if any(kw in text for kw in repurp_keywords):
-            details['service type'] = 'content repurposing'
-
-        # Content type
-        if 'video' in text or 'youtube' in text:
-            details['content type'] = 'video'
-        elif 'podcast' in text or 'audio' in text:
-            details['content type'] = 'audio'
-        elif 'blog' in text or 'article' in text:
-            details['content type'] = 'written'
-
-        # ==== PDF Services specific ====
-        pdf_keywords = ['pdf', 'ocr', 'document conversion', 'fillable form']
-        if any(kw in text for kw in pdf_keywords):
-            details['service type'] = 'pdf services'
-
-        # PDF service type
-        if 'conversion' in text or 'convert' in text:
-            details['pdf service'] = 'conversion'
-        elif 'ocr' in text or 'scanned' in text:
-            details['pdf service'] = 'ocr'
-        elif 'form' in text or 'fillable' in text:
-            details['pdf service'] = 'forms'
-        elif 'edit' in text:
-            details['pdf service'] = 'editing'
-
-        return details
-
-# ---------------------------------------
-# PROPOSAL PERSONALIZATION AGENT
-# ---------------------------------------
+        )
+        if response.status_code == 201:
+            return response.json()["html_url"]
+    except:
+        pass
+    
+    return None
+
+# -----------------------
+# PROPOSAL AGENT
+# -----------------------
 
 class ProposalAgent:
 
-    # Template loader instance
-    template_loader = TemplateLoader()
-
     @staticmethod
     def extract_problem(description):
-
         sentences = re.split(r"[.!?]", description)
-
         for s in sentences:
             if len(s) > 40:
                 return s.strip()
-
         return description[:120]
 
     @staticmethod
-    def generate(job, keyword):
-        """Generate proposal - smarter template selection with fallback."""
-
-        # Find matching template
-        template_name, match_score = ProposalAgent.template_loader.find_matching_template(
-            job.title, job.description
-        )
-
-        # Only use template if match score is good (at least 2 keyword matches)
-        use_template = template_name and match_score >= 2
-
-        if use_template:
-            # Use template but personalize heavily
-            proposal = ProposalAgent.template_loader.personalize_template(
-                template_name, job.title, job.description
-            )
-
-            # Still extract and add job-specific details
-            details = ProposalAgent.extract_custom_details(job.description)
-
-            # Add specific observations from the job
-            specific_notes = []
-            if details.get('industry'):
-                specific_notes.append(f"I see you're working in the {details['industry']} space")
-            if details.get('tools'):
-                specific_notes.append(f"familiar with {details['tools']}")
-            if details.get('goal'):
-                specific_notes.append(f"and your main goal appears to be: {details['goal']}")
-
-            # Add job-specific question
-            question = ProposalAgent.generate_question(job.description)
-
-            if question:
-                proposal += f"\n\n{question}"
-
-            logger.info(f"Using template: {template_name} (score: {match_score})")
-            return proposal
-
-        # Fallback: Generate completely custom proposal based on job specifics
-        # No template - write from scratch using job details
-        logger.info(f"No good template match (score: {match_score}), generating custom proposal")
-
-        # Extract all job specifics for custom proposal
-        details = ProposalAgent.extract_custom_details(job.description)
+    def generate(job, keyword, template_type=None):
         problem = ProposalAgent.extract_problem(job.description)
-
-        # Build custom proposal based on what's in the job posting
-        custom_intro = f"Hi,\n\nI noticed you're looking for help with {keyword}."
         
-        if details.get('industry'):
-            custom_intro += f" Based on your posting, I can see you're in the {details['industry']} industry."
-        if details.get('goal'):
-            custom_intro += f" Your main goal seems to be: {details['goal']}."
-
-        # Build approach section based on detected needs
-        approach_points = []
-        if any(x in job.description.lower() for x in ['automate', 'automation', 'workflow']):
-            approach_points.append("1. Understand your current workflow and identify automation opportunities")
-        if any(x in job.description.lower() for x in ['data', 'extract', 'scrape']):
-            approach_points.append("1. Design data collection and extraction strategy")
-        if any(x in job.description.lower() for x in ['analyze', 'research', 'report']):
-            approach_points.append("1. Research and analyze based on your specific requirements")
-        if any(x in job.description.lower() for x in ['build', 'create', 'develop']):
-            approach_points.append("1. Build a solution tailored to your needs")
-        
-        # Default approach if no specific match
-        if not approach_points:
-            approach_points = [
-                "1. Review your requirements in detail",
-                "2. Propose a tailored solution",
-                "3. Execute to meet your specifications"
-            ]
-
-        approach = "\n".join(approach_points) + "\n\n4. Deliver and ensure you're satisfied with the result"
-
-        # Add specific question based on job
-        question = ProposalAgent.generate_question(job.description) or "What's your timeline for this project?"
-
-        proposal = f"""
-{custom_intro}
-
-From the description, the main goal appears to be:
-"{problem}"
-
-My approach:
-
-{approach}
-
-I've handled similar projects and can deliver quality results.
-
-Quick question:
-{question}
-
-Best,
-"""
-
-        return proposal.strip()
-
-    @staticmethod
-    def extract_custom_details(description):
-        """Extract specific details from job for custom proposals."""
-        text = description.lower()
-        details = {}
-
-        # Industry
-        industries = ['saas', 'tech', 'healthcare', 'finance', 'real estate', 'e-commerce', 'marketing', 'startup', 'retail', 'education']
-        for ind in industries:
-            if ind in text:
-                details['industry'] = ind
-                break
-
-        # Tools mentioned
-        tools = []
-        tool_names = ['python', 'javascript', 'excel', 'google sheets', 'zapier', 'hubspot', 'salesforce', 'shopify', 'wordpress']
-        for t in tool_names:
-            if t in text:
-                tools.append(t)
-        if tools:
-            details['tools'] = ', '.join(tools)
-
-        # Goal/objective
-        if 'automate' in text or 'automation' in text:
-            details['goal'] = 'automation'
-        elif 'data' in text or 'extract' in text:
-            details['goal'] = 'data extraction'
-        elif 'research' in text or 'analysis' in text:
-            details['goal'] = 'research/analysis'
-        elif 'build' in text or 'create' in text:
-            details['goal'] = 'build/create'
-        elif 'manage' in text or 'support' in text:
-            details['goal'] = 'ongoing management'
-
-        return details
-
-        proposal = f"""
+        # Template-aware proposal
+        if template_type:
+            proposal = f"""
 Hi,
 
 I noticed you're looking for help with {keyword}.
 
-From the description it sounds like the main goal is:
+Based on your posting, I understand you need:
 "{problem}"
 
-My approach would be:
+I've built similar solutions for {keyword} projects, including working demos.
 
-1. Review the current requirements and inputs
-2. Build a clean working solution for the task
-3. Deliver structured output ready for use
+My approach:
+1. Understand your specific requirements
+2. Build a tailored solution
+3. Deliver with documentation
 
-I've handled similar work involving {keyword} automation and data workflows.
+I can provide a working demo to show my capability.
 
-Quick question:
-Do you mainly want a one-time task completed, or something reusable long-term?
+Quick question: What's your timeline for this project?
 
 Best,
 """
+        else:
+            proposal = f"""
+Hi,
 
+I noticed you're looking for help with {keyword}.
+
+Problem as I understand:
+"{problem}"
+
+My approach:
+
+1. Review requirements and inputs
+2. Build a clean working solution
+3. Deliver structured, reusable output
+
+I've handled similar {keyword} tasks before.
+
+Quick question: Do you want this as one-time or reusable long-term?
+
+Best,
+"""
         return proposal.strip()
 
-    @staticmethod
-    def generate_question(description):
-        """Generate a specific question based on job description."""
-        text = description.lower()
-
-        questions = []
-
-        # Industry-specific questions
-        if 'saas' in text or 'software' in text:
-            questions.append("What's your current stack and what gaps are you trying to fill?")
-        if 'healthcare' in text:
-            questions.append("What compliance requirements (HIPAA, etc.) should we be aware of?")
-        if 'real estate' in text:
-            questions.append("What MLS systems are you currently using?")
-        if 'finance' in text or 'fintech' in text:
-            questions.append("What data sources are most important for your analysis?")
-
-        # Deliverable-specific questions
-        if 'csv' in text or 'spreadsheet' in text:
-            questions.append("What specific fields do you need in the output?")
-        if 'automation' in text or 'zapier' in text:
-            questions.append("What triggers and actions should the automation include?")
-        if 'email' in text or 'outreach' in text:
-            questions.append("What's your current email deliverability setup?")
-
-        # Scope questions
-        if 'ongoing' in text or 'month' in text:
-            questions.append("What's your expected volume per month?")
-        if 'urgent' in text or 'asap' in text:
-            questions.append("When is your deadline for the initial deliverable?")
-
-        # Return a random question if we found any
-        if questions:
-            import random
-            return random.choice(questions)
-
-        return None
-
-# ---------------------------------------
+# -----------------------
 # KONAN BOT
-# ---------------------------------------
+# -----------------------
 
 class KonanBot:
 
     def __init__(self):
-
         self.db = Database()
+        self.parser = JobParser()
+        self.proposals_sent_hour = 0
+        self.hour_window_start = datetime.utcnow()
 
-    def process_job(self, job):
+    def rate_limit_check(self):
+        now = datetime.utcnow()
+        if (now - self.hour_window_start).total_seconds() > 3600:
+            self.proposals_sent_hour = 0
+            self.hour_window_start = now
+        return self.proposals_sent_hour < MAX_PROPOSALS_PER_HOUR
 
-        if self.db.job_exists(job.id):
-            return
-
-        category, keyword = JobParser.categorize(job)
-
-        if not category:
-            return
-
-        age = JobScorer.age_minutes(job)
-
-        if age > 120:
-            return
-
-        score = JobScorer.score(job, category)
-
-        if score < MIN_SCORE_THRESHOLD:
-            return
-
-        tier = JobPrioritizer.tier(score)
-
-        connects_used = self.db.connects_today()
-
-        if connects_used + job.connects_required > MAX_CONNECTS_PER_DAY:
-            return
-
-        demo_folder = None
-        demo_url = None
-        demo_file = None
-        demo_description = None
-        template_needed = None
-
-        # NEW: Determine if template is needed and which one
-        # Step 1: Check if template matches job
-        from demo_builder import KEYWORD_MAPPING, DEMO_BUILDERS
-        
-        text = (job.title + " " + job.description).lower()
-        template_match = None
-        match_score = 0
-        
-        for keyword, demo_type in KEYWORD_MAPPING.items():
-            if keyword in text:
-                # Found match - keep track of best match
-                if demo_type != template_match:
-                    match_score += 1
-                    template_match = demo_type
-        
-        template_needed = template_match if match_score >= 1 else None
-
-        # Step 2: Generate proposal (template or custom)
-        # If template found, use it; otherwise custom
-        
-        proposal = ProposalAgent.generate(job, keyword)
-
-        # Send Discord alert for high-tier jobs
-        if tier in ["tier1", "tier2"]:
-            DiscordNotifier.send_alert(job.title, score, tier, proposal[:100])
-
-        print("\n--------------------------")
-        print("JOB:", job.title)
-        print("Score:", score)
-        print("Tier:", tier)
-        print("Connects:", job.connects_required)
-        if template_needed:
-            print("Template:", template_needed)
-        else:
-            print("Template: Custom (no matching template)")
-        print("\nPROPOSAL (ready for mass apply):\n")
-        print(proposal)
-
-        # NEW: Ask to mass apply or add to review queue
-        print("\nOptions:")
-        print("1. Submit proposal (mass apply)")
-        print("2. Add to review queue (for demo building later)")
-        print("3. Skip")
-        
-        decision = input("\nChoose (1/2/3): ")
-
-        if decision == "1":
-            # Submit directly
-            self.db.add_connects(job.connects_required)
-            self.db.update_proposal_status(job.id, "submitted")
-            print("✓ Proposal submitted")
-            
-        elif decision == "2":
-            # Add to review queue for later demo building
-            # Store template type for demo building later
-            if template_needed:
-                # Update job with template type
-                self.db.cursor.execute("""
-                    INSERT OR REPLACE INTO proposal_status (job_id, status, template_type, updated_at)
-                    VALUES (?, 'approved_for_demo', ?, ?)
-                """, (job.id, template_needed, datetime.utcnow().isoformat()))
-                self.db.conn.commit()
-            else:
-                self.db.update_proposal_status(job.id, "approved_for_demo")
-            print("✓ Added to review queue - will build demo after approval")
-            
-        else:
-            print("Skipped")
-
-            print("Proposal submitted.")
-
-        self.db.save_job(
-            job.id,
-            job.title,
-            job.description,
-            score,
-            tier,
-            job.connects_required
-        )
+    def process_jobs_batch(self, jobs):
+        scored_jobs = []
+        for job in jobs:
+            try:
+                if self.db.job_exists(job.id):
+                    continue
+                keyword = self.parser.categorize(job)
+                if not keyword:
+                    continue
+                score = JobScorer.score(job, keyword)
+                if score < MIN_SCORE_THRESHOLD:
+                    continue
+                vector = text_to_vector(job.title + job.description)
+                if self.db.is_semantic_duplicate(vector):
+                    continue
+                scored_jobs.append((score, job, keyword, vector))
+            except Exception as e:
+                logger.error(f"Job processing failed: {e}")
+        scored_jobs.sort(key=lambda x: x[0], reverse=True)
+        return scored_jobs
 
     def run(self):
-
         jobs = JobFetcher.fetch()
+        scored_jobs = self.process_jobs_batch(jobs)
+        demo_jobs_count = 0
+        
+        for score, job, keyword, vector in scored_jobs:
+            try:
+                tier = JobPrioritizer.tier(score)
+                connects_used = self.db.connects_today()
+                if connects_used + job.connects_required > MAX_CONNECTS_PER_DAY:
+                    continue
+                if not self.rate_limit_check():
+                    continue
+                
+                # Detect template
+                template_type = detect_template(job.title, job.description)
+                
+                # Generate proposal
+                proposal = ProposalAgent.generate(job, keyword, template_type)
+                
+                # Demo generation (only for high scores)
+                demo_folder = None
+                demo_url = None
+                if score >= DEMO_TRIGGER_SCORE and demo_jobs_count < TOP_DEMO_JOBS:
+                    demo_folder = EnhancedDemoGenerator.generate(job, template_type) if template_type else None
+                    if demo_folder:
+                        demo_url = upload_to_gist(demo_folder, job.title)
+                        demo_jobs_count += 1
+                
+                # Display
+                print("\n" + "="*50)
+                print(f"JOB: {job.title[:60]}...")
+                print(f"Score: {score}/10 | Tier: {tier}")
+                print(f"Template: {template_type or 'Custom'}")
+                print(f"Connects: {job.connects_required}")
+                if demo_folder:
+                    print(f"Demo: {demo_folder}")
+                    if demo_url:
+                        print(f"Gist: {demo_url}")
+                print("-"*50)
+                print("PROPOSAL:\n")
+                print(proposal)
+                
+                # Decision
+                print("\nOptions:")
+                print("1. Submit proposal")
+                print("2. Add to review queue")
+                print("3. Skip")
+                decision = input("\nChoose (1/2/3): ")
+                
+                if decision == "1":
+                    self.db.add_connects(job.connects_required)
+                    self.db.update_proposal_feedback(job.id, accepted=True)
+                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
+                    self.proposals_sent_hour += 1
+                    print("✓ Proposal submitted!")
+                elif decision == "2":
+                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
+                    print("✓ Added to review queue")
+                else:
+                    print("Skipped")
+                    
+            except Exception as e:
+                logger.error(f"Job submission failed: {e}")
 
-        for job in jobs:
-            self.process_job(job)
-
-# ---------------------------------------
-# DEMO BUILDER COMMAND
-# For approved jobs - builds actual demos with full skill execution
-# ---------------------------------------
-
-def build_demo_for_job():
-    """Build ENHANCED demo for a job in the review queue."""
-    from demo_builder import create_demo
-    from enhanced_demo_builder import build_enhanced_demo
-    
-    db = Database()
-    
-    # Get jobs approved for demo
-    db.cursor.execute("SELECT job_id, title, description, status, template_type FROM proposal_status WHERE status='approved_for_demo'")
-    jobs = db.cursor.fetchall()
-    
-    if not jobs:
-        print("No jobs in review queue")
-        return
-    
-    print("\n--- Jobs Approved for Demo ---")
-    for i, row in enumerate(jobs):
-        print(f"{i+1}. {row[1][:50]}... ({row[3]})")
-    
-    choice = input("\nChoose job number to build demo: ")
-    
-    try:
-        idx = int(choice) - 1
-        job_id, title, description, status = jobs[idx]
-    except:
-        print("Invalid choice")
-        return
-    
-    print(f"\nBuilding ENHANCED demo for: {title}")
-    print("Using template + skills for full execution...\n")
-    
-    # First get basic demo type
-    basic_result = create_demo(title, description)
-    demo_type = basic_result.get("demo_type", "lead_generation")
-    
-    # Build ENHANCED demo with actual skill execution
-    try:
-        result = build_enhanced_demo(demo_type, title, description)
-        
-        print(f"\n✓ ENHANCED Demo built!")
-        print(f"Type: {result.get('demo_type')}")
-        print(f"Files: {result.get('files')}")
-        print(f"Improvements applied: {result.get('improvements')}")
-        print(f"Description: {result.get('description')}")
-        
-        # Update status
-        db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
-        db.conn.commit()
-        
-        print("\nDemo ready for your review!")
-        
-    except Exception as e:
-        print(f"Enhanced demo failed: {e}")
-        print("Falling back to basic demo...")
-        
-        result = create_demo(title, description)
-        
-        print(f"\n✓ Basic Demo built!")
-        print(f"Type: {result.get('demo_type')}")
-        print(f"File: {result.get('filepath')}")
-        
-        db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
-        db.conn.commit()
-
-
-# ---------------------------------------
-# MAIN LOOP
-# ---------------------------------------
+# -----------------------
+# MAIN
+# -----------------------
 
 if __name__ == "__main__":
-
-    import sys
-    
-    # Check for demo command
-    if len(sys.argv) > 1 and sys.argv[1] == "--build-demo":
-        build_demo_for_job()
-    else:
-        bot = KonanBot()
-
-        while True:
-
-            bot.run()
-
-            time.sleep(SCAN_INTERVAL)
+    bot = KonanBot()
+    while True:
+        bot.run()
+        import time
+        time.sleep(SCAN_INTERVAL)
