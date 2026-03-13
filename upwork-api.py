@@ -46,6 +46,11 @@ MIN_SCORE_THRESHOLD = 6
 UPWORK_API_KEY = os.environ.get("UPWORK_API_KEY", "")
 UPWORK_SECRET = os.environ.get("UPWORK_SECRET", "")
 
+# Upwork Login Credentials (for scraping stats)
+# export UPWORK_EMAIL=your@email.com UPWORK_PASSWORD=your_password
+UPWORK_EMAIL = os.environ.get("UPWORK_EMAIL", "")
+UPWORK_PASSWORD = os.environ.get("UPWORK_PASSWORD", "")
+
 # Retry Config
 MAX_RETRIES = 3
 RETRY_DELAY = 2
@@ -257,6 +262,150 @@ class UpworkAPI:
     def submit_proposal(self, job_key, cover_letter, bid_amount=0):
         logger.info(f"Would submit proposal to {job_key}")
         return {"success": True, "message": "Demo mode"}
+
+
+# =======================
+# UPWORK AUTH & SCRAPER
+# =======================
+
+class UpworkAuth:
+    """Login to Upwork and maintain session."""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        self.logged_in = False
+    
+    def login(self, email, password):
+        """Login to Upwork with credentials."""
+        try:
+            # Get login page first
+            self.session.get("https://www.upwork.com/ab/authentication/login/", timeout=10)
+            
+            # Submit login form
+            login_url = "https://www.upwork.com/ab/api/authentication/login"
+            data = {
+                "username": email,
+                "password": password,
+                "from": "signin"
+            }
+            
+            response = self.session.post(login_url, data=data, timeout=15)
+            
+            if response.status_code in [200, 302]:
+                self.logged_in = True
+                logger.info("Successfully logged into Upwork")
+                return True
+            else:
+                logger.error(f"Login failed: {response.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"Login error: {e}")
+            return False
+    
+    def is_logged_in(self):
+        """Check if session is still valid."""
+        try:
+            resp = self.session.get("https://www.upwork.com/", timeout=10)
+            return "Sign In" not in resp.text
+        except:
+            return False
+
+
+class UpworkScraper:
+    """Scrape real stats from Upwork dashboard."""
+    
+    def __init__(self, auth: UpworkAuth):
+        self.auth = auth
+        self.stats_cache = None
+        self.cache_time = 0
+        self.cache_ttl = 300  # 5 minutes
+    
+    def get_stats(self, force_refresh=False):
+        """Get stats from Upwork dashboard."""
+        import time
+        
+        # Return cached if fresh
+        if not force_refresh and self.stats_cache and (time.time() - self.cache_time) < self.cache_ttl:
+            return self.stats_cache
+        
+        if not self.auth.logged_in:
+            logger.warning("Not logged in - cannot fetch Upwork stats")
+            return None
+        
+        try:
+            # Fetch dashboard
+            resp = self.auth.session.get("https://www.upwork.com/ab/find-work/", timeout=10)
+            
+            stats = {
+                "connects_remaining": self._extract_connects(resp.text),
+                "proposals_sent": 0,
+                "interviews": 0,
+                "hires": 0,
+                "profile_views": 0,
+                "last_updated": datetime.utcnow().isoformat()
+            }
+            
+            # Try to get more stats from profile
+            try:
+                profile_resp = self.auth.session.get("https://www.upwork.com/ab/profile/", timeout=10)
+                stats.update(self._extract_profile_stats(profile_resp.text))
+            except:
+                pass
+            
+            self.stats_cache = stats
+            self.cache_time = time.time()
+            
+            return stats
+            
+        except Exception as e:
+            logger.error(f"Error scraping Upwork: {e}")
+            return None
+    
+    def _extract_connects(self, html):
+        """Extract connects remaining from HTML."""
+        import re
+        # Look for connects in header or sidebar
+        match = re.search(r'(\d+)\s*connects?\s*(?:remaining|left)', html, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        # Alternative pattern
+        match = re.search(r'Connections?\s*[:\-]?\s*(\d+)', html, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        
+        return None
+    
+    def _extract_profile_stats(self, html):
+        """Extract profile stats from HTML."""
+        import re
+        
+        stats = {}
+        
+        # Proposals
+        match = re.search(r'(\d+)\s*proposals?', html, re.IGNORECASE)
+        if match:
+            stats["proposals_sent"] = int(match.group(1))
+        
+        # Interviews
+        match = re.search(r'(\d+)\s*interviews?', html, re.IGNORECASE)
+        if match:
+            stats["interviews"] = int(match.group(1))
+        
+        # Hires
+        match = re.search(r'(\d+)\s*hires?', html, re.IGNORECASE)
+        if match:
+            stats["hires"] = int(match.group(1))
+        
+        # Profile views
+        match = re.search(r'(\d+)\s*profile\s*views?', html, re.IGNORECASE)
+        if match:
+            stats["profile_views"] = int(match.group(1))
+        
+        return stats
 
 # -----------------------
 # DATA MODEL
@@ -951,42 +1100,47 @@ class KonanBot:
         print("\n=== DEMO BUILD COMPLETE ===")
     
     def show_stats(self):
-        """Show job/proposal stats."""
-        print("\n=== UPWORK BOT STATS ===\n")
+        """Show REAL Upwork stats (from Upwork, not local)."""
+        print("\n=== UPWORK STATS (Real Data) ===\n")
         
-        # Total jobs processed
-        self.db.cursor.execute("SELECT COUNT(*) as total FROM jobs")
-        total = self.db.cursor.fetchone()["total"]
+        # Login to Upwork
+        auth = UpworkAuth()
         
-        # Submitted proposals
-        self.db.cursor.execute("SELECT COUNT(*) as submitted FROM jobs WHERE proposals_sent > 0")
-        submitted = self.db.cursor.fetchone()["submitted"]
+        if UPWORK_EMAIL and UPWORK_PASSWORD:
+            print("🔐 Logging into Upwork...")
+            if auth.login(UPWORK_EMAIL, UPWORK_PASSWORD):
+                print("✅ Logged in!\n")
+                
+                # Scrape stats
+                scraper = UpworkScraper(auth)
+                stats = scraper.get_stats(force_refresh=True)
+                
+                if stats:
+                    print("📊 YOUR UPWORK STATS:")
+                    print("=" * 40)
+                    
+                    if stats.get("connects_remaining"):
+                        print(f"🔗 Connects Remaining: {stats['connects_remaining']}")
+                    if stats.get("proposals_sent"):
+                        print(f"📝 Proposals Sent: {stats['proposals_sent']}")
+                    if stats.get("interviews"):
+                        print(f"💬 Interviews: {stats['interviews']}")
+                    if stats.get("hires"):
+                        print(f"✅ Hires: {stats['hires']}")
+                    if stats.get("profile_views"):
+                        print(f"👁️ Profile Views: {stats['profile_views']}")
+                    if stats.get("last_updated"):
+                        print(f"\n🕐 Last Updated: {stats['last_updated']}")
+                else:
+                    print("⚠️ Could not fetch stats from Upwork")
+            else:
+                print("❌ Login failed - check credentials")
+        else:
+            print("⚠️  Upwork credentials not set")
+            print("\nTo enable real stats, set:")
+            print("  export UPWORK_EMAIL=your@email.com")
+            print("  export UPWORK_PASSWORD=your_password")
         
-        # Queued jobs
-        self.db.cursor.execute("SELECT COUNT(*) as queued FROM jobs WHERE proposals_sent = 0")
-        queued = self.db.cursor.fetchone()["queued"]
-        
-        # By tier
-        self.db.cursor.execute("SELECT tier, COUNT(*) as count FROM jobs GROUP BY tier")
-        tiers = self.db.cursor.fetchall()
-        
-        # By template
-        self.db.cursor.execute("SELECT template_type, COUNT(*) as count FROM jobs WHERE template_type IS NOT NULL GROUP BY template_type")
-        templates = self.db.cursor.fetchall()
-        
-        # Connects used today
-        connects = self.db.connects_today()
-        
-        print(f"Total Jobs Processed: {total}")
-        print(f"Proposals Submitted: {submitted}")
-        print(f"Jobs in Queue: {queued}")
-        print(f"Connects Used Today: {connects}/{MAX_CONNECTS_PER_DAY}")
-        print(f"\nBy Tier:")
-        for t in tiers:
-            print(f"  {t['tier']}: {t['count']}")
-        print(f"\nBy Template:")
-        for t in templates:
-            print(f"  {t['template_type']}: {t['count']}")
         print()
 
 # -----------------------
