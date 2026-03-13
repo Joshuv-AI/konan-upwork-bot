@@ -38,35 +38,229 @@ class TemplateImprover:
         """Analyze what improvements are needed based on job."""
         requirements = []
         
-        # What does the job need?
         if any(x in self.text for x in ['automate', 'automation', 'workflow']):
             requirements.append("automation")
-        
         if any(x in self.text for x in ['data', 'extract', 'scrape', 'collect']):
             requirements.append("data_collection")
-        
         if any(x in self.text for x in ['verify', 'validation', 'check']):
             requirements.append("data_validation")
-        
         if any(x in self.text for x in ['enrich', 'enhance', 'update']):
             requirements.append("data_enrichment")
-        
         if any(x in self.text for x in ['track', 'monitor', 'dashboard']):
             requirements.append("tracking")
-        
         if any(x in self.text for x in ['email', 'notification', 'alert']):
             requirements.append("notifications")
-        
         if any(x in self.text for x in ['api', 'integration', 'connect']):
             requirements.append("api_integration")
-        
         if any(x in self.text for x in ['schedule', 'cron', 'automate']):
             requirements.append("scheduling")
-        
         if any(x in self.text for x in ['test', 'qa', 'quality']):
             requirements.append("testing")
         
         return requirements
+    
+    def get_improvements(self):
+        """Get list of improvements to apply."""
+        return []
+
+
+# ========================================
+# ADD IMPROVERS FOR ALL 13 TEMPLATES
+# ========================================
+
+class ResearchAssistantImprover(TemplateImprover):
+    """Improves research templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "data_collection" in reqs:
+            improvements.append({
+                "type": "data_sources",
+                "content": "# Research Data Sources\n- SEC EDGAR\n- Crunchbase\n- Bloomberg\n- Industry databases"
+            })
+        if "automation" in reqs:
+            improvements.append({
+                "type": "automation",
+                "content": "# Automated Research Script\nimport schedule\n\ndef run_research():\n    # Fetch latest data\n    pass\n\nschedule.every().day.do(run_research)"
+            })
+        return improvements
+
+
+class WebhookAutomationImprover(TemplateImprover):
+    """Improves webhook/automation templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "zapier_template",
+                "content": "# Zapier/Make Automation Template\n# Triggers, Actions, Filters configured"
+            })
+        if "api_integration" in reqs:
+            improvements.append({
+                "type": "api_handler",
+                "content": "# API Integration Handler\ndef handle_webhook(data):\n    # Process and route\n    pass"
+            })
+        return improvements
+
+
+class ColdOutreachImprover(TemplateImprover):
+    """Improves cold outreach templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "email_sequences",
+                "content": "# Email Sequence Script\ndef send_sequence():\n    # Multi-step follow-ups\n    pass"
+            })
+        if "data_validation" in reqs:
+            improvements.append({
+                "type": "email_validation",
+                "content": "# Email Verification\ndef verify_email(email):\n    # Validation logic\n    pass"
+            })
+        return improvements
+
+
+class VirtualAssistantImprover(TemplateImprover):
+    """Improves VA templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "task_automation",
+                "content": "# Task Automation Scripts\n# Calendar, Email, CRM automation"
+            })
+        if "tracking" in reqs:
+            improvements.append({
+                "type": "task_tracker",
+                "content": "# Task Tracking System\n# Kanban board setup"
+            })
+        return improvements
+
+
+class NotionSetupImprover(TemplateImprover):
+    """Improves Notion templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "notion_automation",
+                "content": "# Notion Automation\n# API integration, webhooks"
+            })
+        if "tracking" in reqs:
+            improvements.append({
+                "type": "database_template",
+                "content": "# Notion Database Templates\n# Relations, rollups, views"
+            })
+        return improvements
+
+
+class EmailAutomationImprover(TemplateImprover):
+    """Improves email automation templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "sequence_builder",
+                "content": "# Email Sequence Builder\n# Welcome, nurture, follow-up flows"
+            })
+        if "data_validation" in reqs:
+            improvements.append({
+                "type": "list_cleaning",
+                "content": "# List Cleaning Script\n# Remove bounces, duplicates"
+            })
+        return improvements
+
+
+class SocialMediaImprover(TemplateImprover):
+    """Improves social media templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "posting_automation",
+                "content": "# Social Media Automation\n# Schedule posts, auto-reply"
+            })
+        if "tracking" in reqs:
+            improvements.append({
+                "type": "analytics_tracker",
+                "content": "# Analytics Dashboard\n# Track engagement, growth"
+            })
+        return improvements
+
+
+class ContentRepurposingImprover(TemplateImprover):
+    """Improves content repurposing templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "automation" in reqs:
+            improvements.append({
+                "type": "repurpose_script",
+                "content": "# Content Repurpose Script\n# Transform long-form to short"
+            })
+        if "data_collection" in reqs:
+            improvements.append({
+                "type": "content_matrix",
+                "content": "# Content Matrix\n# Track all repurposed pieces"
+            })
+        return improvements
+
+
+class PDFServicesImprover(TemplateImprover):
+    """Improves PDF service templates."""
+    def get_improvements(self):
+        improvements = []
+        reqs = self.analyze_requirements()
+        
+        if "data_collection" in reqs:
+            improvements.append({
+                "type": "pdf_extraction",
+                "content": "# PDF Data Extraction\n# OCR, text extraction scripts"
+            })
+        if "automation" in reqs:
+            improvements.append({
+                "type": "batch_processing",
+                "content": "# Batch PDF Processing\n# Process multiple files"
+            })
+        return improvements
+
+
+# ========================================
+# IMPROVER MAPPING - ALL 13 TEMPLATES
+# ========================================
+
+class EnhancedDemoBuilder:
+    """Builds demos using templates + actual skill execution."""
+    
+    IMPROVERS = {
+        "lead_generation": LeadGenerationImprover,
+        "data_scraping": DataScrapingImprover,
+        "research_assistant": ResearchAssistantImprover,
+        "webhook_automation": WebhookAutomationImprover,
+        "cold_outreach": ColdOutreachImprover,
+        "excel_sheets": SpreadsheetImprover,
+        "virtual_assistant": VirtualAssistantImprover,
+        "notion_setup": NotionSetupImprover,
+        "qa_testing": QAImprover,
+        "email_automation": EmailAutomationImprover,
+        "social_media": SocialMediaImprover,
+        "content_repurposing": ContentRepurposingImprover,
+        "pdf_services": PDFServicesImprover,
+    }
 
 
 class LeadGenerationImprover(TemplateImprover):
@@ -103,7 +297,7 @@ while True:
         if "data_validation" in reqs:
             improvements.append({
                 "type": "validation",
-                "code": '''# Email validation function
+                "code": r'''# Email validation function
 def validate_email(email):
     import re
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -535,14 +729,68 @@ GlobalTech,Bob Wilson,bob@globaltech.com,555-0103,VP Sales,Enterprise,Qualified,
 
 
 # ========================================
+# GIST UPLOAD FOR DEMOS
+# ========================================
+
+def upload_demo_to_gist(demo_files, job_title):
+    """Upload demo files to GitHub Gist and return URL."""
+    import os
+    import requests
+    
+    gist_token = os.environ.get("GITHUB_TOKEN", "")
+    
+    if not gist_token:
+        return None, "No GITHUB_TOKEN set"
+    
+    files = {}
+    for filepath in demo_files:
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                files[os.path.basename(filepath)] = {"content": f.read()}
+    
+    if not files:
+        return None, "No files to upload"
+    
+    gist_data = {
+        "description": f"Demo: {job_title}",
+        "public": False,
+        "files": files
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.github.com/gists",
+            headers={
+                "Authorization": f"token {gist_token}",
+                "Accept": "application/vnd.github+json"
+            },
+            json=gist_data
+        )
+        
+        if response.status_code == 201:
+            return response.json()["html_url"], "Success"
+        else:
+            return None, f"Failed: {response.status_code}"
+    except Exception as e:
+        return None, str(e)
+
+
+# ========================================
 # MAIN FUNCTION
 # ========================================
 
-def build_enhanced_demo(demo_type, job_title, job_description):
+def build_enhanced_demo(demo_type, job_title, job_description, upload_to_gist=True):
     """Build an enhanced demo using template + skills."""
     
     builder = EnhancedDemoBuilder()
     result = builder.build(demo_type, job_title, job_description)
+    
+    # Upload to Gist if requested
+    gist_url = None
+    if upload_to_gist and result.get("files"):
+        gist_url, gist_msg = upload_demo_to_gist(result["files"], job_title)
+        result["gist_url"] = gist_url
+        result["gist_message"] = gist_msg
     
     return result
 
