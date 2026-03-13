@@ -753,6 +753,27 @@ class TemplateLoader:
         elif 'demo' in text:
             details['goal'] = 'book demos'
 
+        # ==== Excel/Sheets specific ====
+        if 'excel' in text or 'spreadsheet' in text or 'google sheet' in text or 'dashboard' in text:
+            details['platform'] = 'Excel/Google Sheets'
+            details['project type'] = 'spreadsheet/dashboard'
+
+        # Use case detection
+        if 'financial' in text or 'finance' in text or 'p&l' in text or 'cash flow' in text:
+            details['use case'] = 'financial model'
+        elif 'budget' in text or 'tracking' in text:
+            details['use case'] = 'budget/tracker'
+        elif 'project' in text:
+            details['use case'] = 'project management'
+        elif 'sales' in text or 'crm' in text:
+            details['use case'] = 'sales/CRM'
+        elif 'inventory' in text:
+            details['use case'] = 'inventory'
+        elif 'analytics' in text or 'dashboard' in text:
+            details['use case'] = 'analytics/dashboard'
+        else:
+            details['use case'] = 'spreadsheet automation'
+
         return details
 
 # ---------------------------------------
