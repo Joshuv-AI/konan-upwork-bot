@@ -691,6 +691,46 @@ class TemplateLoader:
         if 'json' in text:
             details['deliverable format'] = 'JSON'
 
+        # ==== Webhook/Automation specific ====
+        # Platforms mentioned
+        platforms = []
+        if 'zapier' in text:
+            platforms.append('Zapier')
+        if 'make' in text or 'integromat' in text:
+            platforms.append('Make')
+        if 'n8n' in text:
+            platforms.append('n8n')
+        if 'hubspot' in text:
+            platforms.append('HubSpot')
+        if 'salesforce' in text:
+            platforms.append('Salesforce')
+        if 'slack' in text:
+            platforms.append('Slack')
+        if 'google sheet' in text or 'gsheets' in text:
+            platforms.append('Google Sheets')
+        if platforms:
+            details['platforms'] = ', '.join(platforms)
+
+        # Automation type
+        if 'crm' in text or 'lead' in text:
+            details['automation type'] = 'CRM/lead automation'
+        elif 'data sync' in text or 'sync' in text:
+            details['automation type'] = 'data synchronization'
+        elif 'webhook' in text:
+            details['automation type'] = 'webhook processing'
+        elif 'api' in text:
+            details['automation type'] = 'API integration'
+        else:
+            details['automation type'] = 'workflow automation'
+
+        # Complexity
+        if 'complex' in text or 'multiple' in text or 'enterprise' in text:
+            details['complexity'] = 'advanced'
+        elif 'simple' in text or 'basic' in text:
+            details['complexity'] = 'simple'
+        else:
+            details['complexity'] = 'standard'
+
         return details
 
 # ---------------------------------------
