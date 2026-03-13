@@ -1149,20 +1149,13 @@ class KonanBot:
         demo_file = None
         demo_description = None
 
-        # Generate DEMO using skills if score is high enough
-        if score >= DEMO_TRIGGER_SCORE:
-            # Create working demo using skills
-            try:
-                demo_result = create_demo(job.title, job.description)
-                demo_file = demo_result.get("filepath")
-                demo_description = demo_result.get("description")
-                logger.info(f"Built demo: {demo_result.get('demo_type')} - {demo_description}")
-            except Exception as e:
-                logger.warning(f"Demo build failed: {e}")
-                # Fallback to old demo generator
-                demo_folder = DemoGenerator.generate(job)
-                demo_url = GistUploader.upload_demo(demo_folder)
-
+        # NEW FLOW: Don't build demo automatically
+        # Step 1: Generate proposal only (for mass applying)
+        # Demo will be built AFTER job is approved
+        
+        # OLD: if score >= DEMO_TRIGGER_SCORE:
+        # We skip demo building during scan
+        
         proposal = ProposalAgent.generate(job, keyword)
 
         # Send Discord alert for high-tier jobs
@@ -1173,20 +1166,31 @@ class KonanBot:
         print("JOB:", job.title)
         print("Score:", score)
         print("Tier:", tier)
-        if demo_file:
-            print("DEMO (built with skills):", demo_file)
-            print("Demo Description:", demo_description)
-        else:
-            print("Demo:", demo_url or demo_folder)
-        print("\nPROPOSAL:\n")
+        print("Connects:", job.connects_required)
+        print("\nPROPOSAL (ready for mass apply):\n")
         print(proposal)
 
-        decision = input("\nSubmit proposal? (y/n): ")
+        # NEW: Ask to mass apply or add to review queue
+        print("\nOptions:")
+        print("1. Submit proposal (mass apply)")
+        print("2. Add to review queue (for demo building later)")
+        print("3. Skip")
+        
+        decision = input("\nChoose (1/2/3): ")
 
-        if decision.lower() == "y":
-
+        if decision == "1":
+            # Submit directly
             self.db.add_connects(job.connects_required)
             self.db.update_proposal_status(job.id, "submitted")
+            print("✓ Proposal submitted")
+            
+        elif decision == "2":
+            # Add to review queue for later demo building
+            self.db.update_proposal_status(job.id, "approved_for_demo")
+            print("✓ Added to review queue - will build demo after approval")
+            
+        else:
+            print("Skipped")
 
             print("Proposal submitted.")
 
@@ -1207,15 +1211,70 @@ class KonanBot:
             self.process_job(job)
 
 # ---------------------------------------
+# DEMO BUILDER COMMAND
+# For approved jobs - builds actual demos
+# ---------------------------------------
+
+def build_demo_for_job():
+    """Build demo for a job in the review queue."""
+    from demo_builder import create_demo
+    
+    db = Database()
+    
+    # Get jobs approved for demo
+    db.cursor.execute("SELECT job_id, title, description, status FROM proposal_status WHERE status='approved_for_demo'")
+    jobs = db.cursor.fetchall()
+    
+    if not jobs:
+        print("No jobs in review queue")
+        return
+    
+    print("\n--- Jobs Approved for Demo ---")
+    for i, row in enumerate(jobs):
+        print(f"{i+1}. {row[1][:50]}... ({row[3]})")
+    
+    choice = input("\nChoose job number to build demo: ")
+    
+    try:
+        idx = int(choice) - 1
+        job_id, title, description, status = jobs[idx]
+    except:
+        print("Invalid choice")
+        return
+    
+    print(f"\nBuilding demo for: {title}")
+    
+    # Build demo using skills + template
+    result = create_demo(title, description)
+    
+    print(f"\n✓ Demo built!")
+    print(f"Type: {result.get('demo_type')}")
+    print(f"File: {result.get('filepath')}")
+    print(f"Description: {result.get('description')}")
+    
+    # Update status
+    db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
+    db.conn.commit()
+    
+    print("\nDemo ready for your review!")
+
+
+# ---------------------------------------
 # MAIN LOOP
 # ---------------------------------------
 
 if __name__ == "__main__":
 
-    bot = KonanBot()
+    import sys
+    
+    # Check for demo command
+    if len(sys.argv) > 1 and sys.argv[1] == "--build-demo":
+        build_demo_for_job()
+    else:
+        bot = KonanBot()
 
-    while True:
+        while True:
 
-        bot.run()
+            bot.run()
 
-        time.sleep(SCAN_INTERVAL)
+            time.sleep(SCAN_INTERVAL)
