@@ -986,66 +986,109 @@ class KonanBot:
 
     def run(self):
         """
-        FLOW:
-        1. Scan jobs → Show proposals (NO demo yet)
-        2. User chooses: Submit / Review Queue / Skip
-        3. (Demo built ONLY via --build-demo after approval)
+        AUTO-SUBMIT FLOW:
+        1. Scan jobs → Auto-submit if score >= threshold
+        2. Continue loop
+        3. Check for approvals periodically
+        4. If approval → build demo, wait for review
         """
         jobs = JobFetcher.fetch()
         scored_jobs = self.process_jobs_batch(jobs)
         
+        submitted_count = 0
+        
         for score, job, keyword, vector in scored_jobs:
             try:
-                tier = JobPrioritizer.tier(score)
+                # Check rate limits
                 connects_used = self.db.connects_today()
                 if connects_used + job.connects_required > MAX_CONNECTS_PER_DAY:
-                    continue
+                    logger.info("Daily connect limit reached")
+                    break
                 if not self.rate_limit_check():
-                    continue
+                    logger.info("Hourly rate limit reached")
+                    break
                 
-                # Detect template (for later demo building)
+                # Detect template
+                tier = JobPrioritizer.tier(score)
                 template_type = detect_template(job.title, job.description)
                 
-                # Generate proposal (NO demo built here!)
+                # Generate proposal
                 proposal = ProposalAgent.generate(job, keyword, template_type)
                 
-                # Display job info
-                print("\n" + "="*50)
-                print(f"JOB: {job.title[:60]}...")
-                print(f"Score: {score}/10 | Tier: {tier}")
-                print(f"Template: {template_type or 'Custom'}")
-                print(f"Connects: {job.connects_required}")
-                print("-"*50)
-                print("PROPOSAL:\n")
-                print(proposal)
+                # AUTO-SUBMIT: No waiting for user input
+                self.db.add_connects(job.connects_required)
+                self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type, status="submitted")
+                self.proposals_sent_hour += 1
+                submitted_count += 1
                 
-                # Decision (NO demo built here!)
-                print("\nOptions:")
-                print("1. Submit proposal (uses 1 connect)")
-                print("2. Add to review queue")
-                print("3. Skip")
-                decision = input("\nChoose (1/2/3): ")
+                # Log and alert
+                logger.info(f"Auto-submitted: {job.title[:40]}... (Score: {score})")
+                send_discord_alert(job.title, score, tier, "Auto-Submitted", job.connects_required)
                 
-                if decision == "1":
-                    self.db.add_connects(job.connects_required)
-                    self.db.update_proposal_feedback(job.id, accepted=True)
-                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
-                    self.proposals_sent_hour += 1
-                    print("✓ Proposal submitted! Use --build-demo later to add demo.")
-                    # Discord alert
-                    send_discord_alert(job.title, score, tier, "Submitted", job.connects_required)
-                elif decision == "2":
-                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
-                    print("✓ Added to review queue")
-                    # Discord alert
-                    send_discord_alert(job.title, score, tier, "Queued", 0)
-                else:
-                    # Save skipped jobs too (for deduplication)
-                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
-                    print("Skipped (saved for dedup)")
-                    
             except Exception as e:
-                logger.error(f"Job submission failed: {e}")
+                logger.error(f"Auto-submit failed: {e}")
+        
+        return submitted_count
+    
+    def check_for_approvals(self):
+        """Check Upwork for new approvals/interviews."""
+        try:
+            auth = UpworkAuth()
+            if not auth.login(UPWORK_EMAIL, UPWORK_PASSWORD):
+                return None
+            
+            scraper = UpworkScraper(auth)
+            stats = scraper.get_stats(force_refresh=True)
+            
+            if stats:
+                # Check for new interviews/hires
+                interviews = stats.get('interviews', 0)
+                hires = stats.get('hires', 0)
+                
+                # Get previous state from DB or memory
+                prev_interviews = getattr(self, 'prev_interviews', 0)
+                prev_hires = getattr(self, 'prev_hires', 0)
+                
+                new_interviews = interviews - prev_interviews
+                new_hires = hires - prev_hires
+                
+                # Store current state
+                self.prev_interviews = interviews
+                self.prev_hires = hires
+                
+                if new_interviews > 0 or new_hires > 0:
+                    return {
+                        'new_interviews': new_interviews,
+                        'new_hires': new_hires,
+                        'stats': stats
+                    }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Approval check failed: {e}")
+            return None
+    
+    def handle_approval(self, approval_data):
+        """Handle approval - build demo and notify."""
+        print("\n" + "="*50)
+        print("🎉 NEW APPROVAL DETECTED!")
+        print(f"  Interviews: +{approval_data['new_interviews']}")
+        print(f"  Hires: +{approval_data['new_hires']}")
+        print("="*50)
+        
+        # Alert on Discord
+        msg = f"🎉 **NEW APPROVAL!**\n"
+        msg += f"Interviews: +{approval_data['new_interviews']}\n"
+        msg += f"Hires: +{approval_data['new_hires']}\n\n"
+        msg += "Building demos for review..."
+        
+        logger.info(msg)
+        
+        # Build demos for recent submissions
+        self.build_demo_for_queued_jobs()
+        
+        return True
 
     def build_demo_for_queued_jobs(self):
         """
@@ -1160,23 +1203,46 @@ class KonanBot:
 # -----------------------
 
 import sys
+import time
 
 def main():
     bot = KonanBot()
     
+    # Parse arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "--build-demo":
             bot.build_demo_for_queued_jobs()
         elif sys.argv[1] == "--stats":
             bot.show_stats()
+        elif sys.argv[1] == "--run":
+            # Auto-run mode: submit + check approvals
+            approval_check_interval = 300  # Check every 5 minutes
+            cycles = 0
+            
+            while True:
+                cycles += 1
+                print(f"\n--- Cycle {cycles} ---")
+                
+                # 1. Auto-submit jobs
+                submitted = bot.run()
+                print(f"Submitted {submitted} jobs this cycle")
+                
+                # 2. Check for approvals
+                approval = bot.check_for_approvals()
+                
+                if approval:
+                    print("Approval detected! Building demos...")
+                    bot.handle_approval(approval)
+                    print("Review complete. Resuming auto-submit...")
+                
+                # 3. Wait before next cycle
+                print(f"Waiting {SCAN_INTERVAL}s before next scan...")
+                time.sleep(SCAN_INTERVAL)
         else:
-            print("Usage: python upwork-api.py [--build-demo|--stats]")
+            print("Usage: python upwork-api.py [--build-demo|--stats|--run]")
     else:
-        # Normal scan loop
-        while True:
-            bot.run()
-            import time
-            time.sleep(SCAN_INTERVAL)
+        # Default: single run
+        bot.run()
 
 if __name__ == "__main__":
     main()
