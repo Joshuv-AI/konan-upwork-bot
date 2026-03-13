@@ -704,9 +704,14 @@ class KonanBot:
         return scored_jobs
 
     def run(self):
+        """
+        FLOW:
+        1. Scan jobs → Show proposals (NO demo yet)
+        2. User chooses: Submit / Review Queue / Skip
+        3. (Demo built ONLY via --build-demo after approval)
+        """
         jobs = JobFetcher.fetch()
         scored_jobs = self.process_jobs_batch(jobs)
-        demo_jobs_count = 0
         
         for score, job, keyword, vector in scored_jobs:
             try:
@@ -717,38 +722,25 @@ class KonanBot:
                 if not self.rate_limit_check():
                     continue
                 
-                # Detect template
+                # Detect template (for later demo building)
                 template_type = detect_template(job.title, job.description)
                 
-                # Generate proposal
+                # Generate proposal (NO demo built here!)
                 proposal = ProposalAgent.generate(job, keyword, template_type)
                 
-                # Demo generation (only for high scores)
-                demo_folder = None
-                demo_url = None
-                if score >= DEMO_TRIGGER_SCORE and demo_jobs_count < TOP_DEMO_JOBS:
-                    demo_folder = EnhancedDemoGenerator.generate(job, template_type) if template_type else None
-                    if demo_folder:
-                        demo_url = upload_to_gist(demo_folder, job.title)
-                        demo_jobs_count += 1
-                
-                # Display
+                # Display job info
                 print("\n" + "="*50)
                 print(f"JOB: {job.title[:60]}...")
                 print(f"Score: {score}/10 | Tier: {tier}")
                 print(f"Template: {template_type or 'Custom'}")
                 print(f"Connects: {job.connects_required}")
-                if demo_folder:
-                    print(f"Demo: {demo_folder}")
-                    if demo_url:
-                        print(f"Gist: {demo_url}")
                 print("-"*50)
                 print("PROPOSAL:\n")
                 print(proposal)
                 
-                # Decision
+                # Decision (NO demo built here!)
                 print("\nOptions:")
-                print("1. Submit proposal")
+                print("1. Submit proposal (uses 1 connect)")
                 print("2. Add to review queue")
                 print("3. Skip")
                 decision = input("\nChoose (1/2/3): ")
@@ -758,7 +750,7 @@ class KonanBot:
                     self.db.update_proposal_feedback(job.id, accepted=True)
                     self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
                     self.proposals_sent_hour += 1
-                    print("✓ Proposal submitted!")
+                    print("✓ Proposal submitted! Use --build-demo later to add demo.")
                 elif decision == "2":
                     self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
                     print("✓ Added to review queue")
@@ -768,13 +760,85 @@ class KonanBot:
             except Exception as e:
                 logger.error(f"Job submission failed: {e}")
 
+    def build_demo_for_queued_jobs(self):
+        """
+        Called via: python upwork-api.py --build-demo
+        
+        FLOW:
+        1. Get jobs from review queue
+        2. Build demo for each (template + skills = actual product)
+        3. Upload to Gist
+        4. Return demo URLs for review
+        """
+        print("\n=== BUILDING DEMOS FOR QUEUED JOBS ===\n")
+        
+        # Get queued jobs (proposals_sent = 0, have template_type)
+        self.db.cursor.execute("""
+            SELECT * FROM jobs 
+            WHERE proposals_sent = 0 
+            AND template_type IS NOT NULL
+            ORDER BY score DESC
+            LIMIT ?
+        """, (TOP_DEMO_JOBS,))
+        
+        rows = self.db.cursor.fetchall()
+        if not rows:
+            print("No jobs in review queue. Run scan first.")
+            return
+        
+        for row in rows:
+            job_id = row["id"]
+            title = row["title"]
+            description = row["description"]
+            template_type = row["template_type"]
+            
+            print(f"\n--- Building demo for: {title[:40]}... ---")
+            print(f"Template: {template_type}")
+            
+            # Create job object for demo builder
+            job = Job(
+                id=job_id,
+                title=title,
+                description=description,
+                created=datetime.utcnow()
+            )
+            
+            # Build demo
+            demo_folder = EnhancedDemoBuilder.generate(job, template_type)
+            
+            if demo_folder:
+                # Upload to Gist
+                gist_url = upload_to_gist(demo_folder, title)
+                
+                if gist_url:
+                    print(f"✓ Demo built & uploaded!")
+                    print(f"  Gist URL: {gist_url}")
+                else:
+                    print(f"✓ Demo built (local: {demo_folder})")
+            else:
+                print(f"✗ Demo build failed")
+        
+        print("\n=== DEMO BUILD COMPLETE ===")
+
 # -----------------------
 # MAIN
 # -----------------------
 
-if __name__ == "__main__":
+import sys
+
+def main():
     bot = KonanBot()
-    while True:
-        bot.run()
-        import time
-        time.sleep(SCAN_INTERVAL)
+    
+    # Check for --build-demo flag
+    if len(sys.argv) > 1 and sys.argv[1] == "--build-demo":
+        # Build demos for queued jobs
+        bot.build_demo_for_queued_jobs()
+    else:
+        # Normal scan loop
+        while True:
+            bot.run()
+            import time
+            time.sleep(SCAN_INTERVAL)
+
+if __name__ == "__main__":
+    main()
