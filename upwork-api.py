@@ -54,6 +54,10 @@ TOP_DEMO_JOBS = 10
 LOG_LEVEL = logging.INFO
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
+# GitHub Token for Gist uploads
+# export GITHUB_TOKEN=your_token
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+
 # 13 Target Keywords
 TARGET_JOBS = [
     "research assistant",
@@ -113,7 +117,9 @@ class Database:
                 proposals_accepted INTEGER,
                 hired INTEGER,
                 vector TEXT,
-                template_type TEXT
+                template_type TEXT,
+                url TEXT,
+                status TEXT
             )
         """)
         self.cursor.execute("""
@@ -122,6 +128,18 @@ class Database:
                 connects_used INTEGER
             )
         """)
+        
+        # Migration: Add missing columns if they exist
+        try:
+            self.cursor.execute("SELECT url FROM jobs LIMIT 1")
+        except:
+            self.cursor.execute("ALTER TABLE jobs ADD COLUMN url TEXT")
+        
+        try:
+            self.cursor.execute("SELECT status FROM jobs LIMIT 1")
+        except:
+            self.cursor.execute("ALTER TABLE jobs ADD COLUMN status TEXT")
+        
         self.conn.commit()
 
     def job_exists(self, job_id):
@@ -630,8 +648,9 @@ def upload_to_gist(folder, job_title):
     """Upload demo folder to GitHub Gist."""
     import base64
     
-    gist_token = os.environ.get("GITHUB_TOKEN", "")
+    gist_token = GITHUB_TOKEN or os.environ.get("GITHUB_TOKEN", "")
     if not gist_token:
+        logger.warning("GITHUB_TOKEN not set - demo won't be uploaded to Gist")
         return None
     
     files = {}
