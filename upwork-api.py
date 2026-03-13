@@ -18,6 +18,11 @@ import re
 import json
 import time
 import uuid
+from datetime import datetime, timedelta
+from pathlib import Path
+
+# Import demo builder
+from demo_builder import DemoBuilder, create_demo
 import hashlib
 import sqlite3
 import logging
@@ -1141,11 +1146,22 @@ class KonanBot:
 
         demo_folder = None
         demo_url = None
+        demo_file = None
+        demo_description = None
 
+        # Generate DEMO using skills if score is high enough
         if score >= DEMO_TRIGGER_SCORE:
-            demo_folder = DemoGenerator.generate(job)
-            # Upload to GitHub Gist for sharing
-            demo_url = GistUploader.upload_demo(demo_folder)
+            # Create working demo using skills
+            try:
+                demo_result = create_demo(job.title, job.description)
+                demo_file = demo_result.get("filepath")
+                demo_description = demo_result.get("description")
+                logger.info(f"Built demo: {demo_result.get('demo_type')} - {demo_description}")
+            except Exception as e:
+                logger.warning(f"Demo build failed: {e}")
+                # Fallback to old demo generator
+                demo_folder = DemoGenerator.generate(job)
+                demo_url = GistUploader.upload_demo(demo_folder)
 
         proposal = ProposalAgent.generate(job, keyword)
 
@@ -1157,7 +1173,11 @@ class KonanBot:
         print("JOB:", job.title)
         print("Score:", score)
         print("Tier:", tier)
-        print("Demo:", demo_url or demo_folder)
+        if demo_file:
+            print("DEMO (built with skills):", demo_file)
+            print("Demo Description:", demo_description)
+        else:
+            print("Demo:", demo_url or demo_folder)
         print("\nPROPOSAL:\n")
         print(proposal)
 
