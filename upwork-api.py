@@ -791,6 +791,23 @@ class TemplateLoader:
         elif 'sales' in text or 'crm' in text:
             details['va specialization'] = 'sales VA'
 
+        # ==== Notion specific ====
+        if 'notion' in text:
+            details['service type'] = 'notion setup'
+            details['project type'] = 'Notion workspace'
+
+        # Notion specific needs
+        if 'database' in text or 'relation' in text or 'rollup' in text:
+            details['notion feature'] = 'database design'
+        elif 'template' in text:
+            details['notion feature'] = 'template creation'
+        elif 'migration' in text or 'migrate' in text:
+            details['notion feature'] = 'migration'
+        elif 'automation' in text or 'zapier' in text:
+            details['notion feature'] = 'automation'
+        elif 'api' in text or 'integration' in text:
+            details['notion feature'] = 'API/integration'
+
         return details
 
 # ---------------------------------------
