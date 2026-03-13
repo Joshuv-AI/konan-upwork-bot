@@ -656,6 +656,31 @@ class TemplateLoader:
         elif '10000' in text or '10k' in text:
             details['expected volume'] = '10,000+ records'
 
+        # ==== Research Assistant specific ====
+        research_types = []
+        if 'market research' in text:
+            research_types.append('market research')
+        if 'competitor' in text or 'competitive' in text:
+            research_types.append('competitor analysis')
+        if 'due diligence' in text:
+            research_types.append('due diligence')
+        if 'industry' in text:
+            research_types.append('industry research')
+        if 'company' in text or 'company profile' in text:
+            research_types.append('company research')
+        if 'academic' in text or 'literature' in text:
+            research_types.append('academic research')
+        if research_types:
+            details['research type'] = ', '.join(research_types)
+
+        # Research depth
+        if 'deep' in text or 'comprehensive' in text or 'extensive' in text:
+            details['research depth'] = 'comprehensive'
+        elif 'quick' in text or 'brief' in text or 'overview' in text:
+            details['research depth'] = 'overview'
+        else:
+            details['research depth'] = 'standard'
+
         # ==== Common deliverable format ====
         if 'csv' in text:
             details['deliverable format'] = 'CSV'
