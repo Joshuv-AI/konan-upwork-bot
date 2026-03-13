@@ -1,5 +1,10 @@
-# Upwork Proposal Skill - Python Version
-# Integrates with upwork-api.py
+
+# Upwork Proposal Skill - Python Version (with Humanizer)
+# Integrates with upwork-api.py + humanize-ai-text skill
+
+import os
+import subprocess
+import tempfile
 
 CATEGORY_TEMPLATES = {
     "lead_generation": {
@@ -45,7 +50,7 @@ CATEGORY_TEMPLATES = {
         ]
     },
     "webhook_automation": {
-        "name": "Webhook & Automation",
+        "name": "Webhook and Automation",
         "tools": ["Zapier", "Make.com", "Webhooks", "API integrations"],
         "approach": [
             "Design automation workflow for your process",
@@ -232,7 +237,7 @@ def calculate_pricing(difficulty, hourly_rate=25):
     
     if hours < 20:
         milestones = [
-            {"title": "Discovery & Plan", "percent": 30, "amount": round(total * 0.3)},
+            {"title": "Discovery and Plan", "percent": 30, "amount": round(total * 0.3)},
             {"title": "Implementation", "percent": 50, "amount": round(total * 0.5)},
             {"title": "Delivery", "percent": 20, "amount": round(total * 0.2)}
         ]
@@ -273,7 +278,7 @@ def generate_proposal(job_description, job_title="", client_name="", hourly_rate
 I noticed you mentioned "{key_phrase}". I've helped clients with similar {template['name'].lower()} projects.
 
 My approach:
-{chr(10).join('• ' + a for a in template['approach'])}
+{chr(10).join('* ' + a for a in template['approach'])}
 
 Tools I'll use: {', '.join(template['tools'][:4])}
 
@@ -297,11 +302,110 @@ Best,
     }
 
 
+# =======================
+# HUMANIZE INTEGRATION
+# =======================
+
+def get_humanizer_path():
+    """Get the path to the humanize-ai-text transform script."""
+    # Try multiple possible locations
+    possible_paths = [
+        os.path.join(os.path.dirname(__file__), '..', 'humanize-ai-text', 'scripts', 'transform.py'),
+        os.path.join(os.path.dirname(__file__), 'humanize-ai-text', 'scripts', 'transform.py'),
+        'skills/humanize-ai-text/scripts/transform.py',
+        'humanize-ai-text/scripts/transform.py'
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return possible_paths[0]  # Return first as fallback
+
+
+def humanize_proposal(proposal_text):
+    """Humanize a proposal using the humanize-ai-text skill.
+    
+    This transforms robotic AI-sounding text into natural,
+    human-like writing that clients prefer.
+    """
+    try:
+        script_path = get_humanizer_path()
+        
+        # Create temp file with proposal
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+            f.write(proposal_text)
+            temp_input = f.name
+        
+        temp_output = temp_input.replace('.txt', '_human.txt')
+        
+        # Run humanizer
+        result = subprocess.run(
+            ['python', script_path, temp_input, '-o', temp_output, '-q'],
+            capture_output=True,
+            timeout=30,
+            text=True
+        )
+        
+        # Read humanized version
+        if os.path.exists(temp_output):
+            with open(temp_output, 'r', encoding='utf-8') as f:
+                humanized = f.read()
+            
+            # Cleanup
+            try:
+                os.remove(temp_input)
+                os.remove(temp_output)
+            except:
+                pass
+            
+            return humanized.strip()
+        
+        # Cleanup on failure
+        try:
+            os.remove(temp_input)
+        except:
+            pass
+            
+        return proposal_text
+        
+    except Exception as e:
+        print(f"Humanize error: {e}")
+        return proposal_text
+
+
+def generate_human_proposal(job_description, job_title="", client_name="", hourly_rate=25, profile_name="Your Freelancer", humanize=True):
+    """Generate a proposal and optionally humanize it.
+    
+    Args:
+        job_description: The job description text
+        job_title: Title of the job
+        client_name: Name of the client
+        hourly_rate: Your hourly rate
+        profile_name: Your name
+        humanize: Whether to humanize the proposal (default: True)
+    
+    Returns:
+        Dictionary with proposal and metadata
+    """
+    # Step 1: Generate base proposal
+    result = generate_proposal(job_description, job_title, client_name, hourly_rate, profile_name)
+    
+    # Step 2: Humanize if enabled
+    if humanize:
+        result['proposal'] = humanize_proposal(result['proposal'])
+        result['humanized'] = True
+    else:
+        result['humanized'] = False
+    
+    return result
+
+
 if __name__ == "__main__":
     # Test
     test_job = "Need help with lead generation for B2B SaaS companies. Looking for someone to build prospect list with verified emails."
-    result = generate_proposal(test_job, "Lead Generation Job", "Client")
+    result = generate_human_proposal(test_job, "Lead Generation Job", "Client", humanize=True)
     print(f"Category: {result['category']}")
     print(f"Template: {result['template']}")
+    print(f"Humanized: {result['humanized']}")
     print(f"\nProposal:\n{result['proposal']}")
     print(f"\nPricing: ${result['pricing']['total']}")
