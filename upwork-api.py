@@ -731,6 +731,28 @@ class TemplateLoader:
         else:
             details['complexity'] = 'standard'
 
+        # ==== Cold Outreach specific ====
+        if 'cold' in text or 'outreach' in text or 'email' in text or 'outbound' in text:
+            details['campaign type'] = 'cold outreach'
+
+        # Outreach channel
+        if 'linkedin' in text:
+            details['channel'] = 'LinkedIn'
+        elif 'email' in text or 'cold' in text or 'outreach' in text:
+            details['channel'] = 'email'
+        if 'multi' in text or 'both' in text:
+            details['channel'] = 'multi-channel'
+
+        # Campaign goal
+        if 'meeting' in text:
+            details['goal'] = 'book meetings'
+        elif 'lead' in text:
+            details['goal'] = 'generate leads'
+        elif 'pipeline' in text:
+            details['goal'] = 'build pipeline'
+        elif 'demo' in text:
+            details['goal'] = 'book demos'
+
         return details
 
 # ---------------------------------------
