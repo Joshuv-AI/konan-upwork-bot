@@ -774,6 +774,23 @@ class TemplateLoader:
         else:
             details['use case'] = 'spreadsheet automation'
 
+        # ==== Virtual Assistant specific ====
+        va_keywords = ['virtual assistant', 'va', 'executive assistant', 'administrative', 'calendar management', 'inbox', 'admin support']
+        if any(kw in text for kw in va_keywords):
+            details['service type'] = 'virtual assistant'
+
+        # VA specialization
+        if 'executive' in text or 'ceo' in text or 'c-suite' in text:
+            details['va specialization'] = 'executive assistant'
+        elif 'real estate' in text:
+            details['va specialization'] = 'real estate VA'
+        elif 'tech' in text or 'startup' in text or 'saas' in text:
+            details['va specialization'] = 'tech startup VA'
+        elif 'ecommerce' in text or 'e-commerce' in text or 'shopify' in text:
+            details['va specialization'] = 'e-commerce VA'
+        elif 'sales' in text or 'crm' in text:
+            details['va specialization'] = 'sales VA'
+
         return details
 
 # ---------------------------------------
