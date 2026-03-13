@@ -827,6 +827,19 @@ class TemplateLoader:
         elif 'api' in text:
             details['testing type'] = 'api testing'
 
+        # ==== Email Automation specific ====
+        email_keywords = ['email', 'mailchimp', 'klaviyo', 'hubspot', 'sendgrid', 'marketing email', 'newsletter', 'drip']
+        if any(kw in text for kw in email_keywords):
+            details['service type'] = 'email automation'
+
+        # Email type
+        if 'marketing' in text:
+            details['email type'] = 'marketing'
+        elif 'transactional' in text:
+            details['email type'] = 'transactional'
+        elif 'newsletter' in text:
+            details['email type'] = 'newsletter'
+
         return details
 
 # ---------------------------------------
