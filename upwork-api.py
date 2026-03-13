@@ -145,6 +145,7 @@ class Database:
         CREATE TABLE IF NOT EXISTS proposal_status(
             job_id TEXT PRIMARY KEY,
             status TEXT,
+            template_type TEXT,
             updated_at TEXT
         )
         """)
@@ -1148,13 +1149,27 @@ class KonanBot:
         demo_url = None
         demo_file = None
         demo_description = None
+        template_needed = None
 
-        # NEW FLOW: Don't build demo automatically
-        # Step 1: Generate proposal only (for mass applying)
-        # Demo will be built AFTER job is approved
+        # NEW: Determine if template is needed and which one
+        # Step 1: Check if template matches job
+        from demo_builder import KEYWORD_MAPPING, DEMO_BUILDERS
         
-        # OLD: if score >= DEMO_TRIGGER_SCORE:
-        # We skip demo building during scan
+        text = (job.title + " " + job.description).lower()
+        template_match = None
+        match_score = 0
+        
+        for keyword, demo_type in KEYWORD_MAPPING.items():
+            if keyword in text:
+                # Found match - keep track of best match
+                if demo_type != template_match:
+                    match_score += 1
+                    template_match = demo_type
+        
+        template_needed = template_match if match_score >= 1 else None
+
+        # Step 2: Generate proposal (template or custom)
+        # If template found, use it; otherwise custom
         
         proposal = ProposalAgent.generate(job, keyword)
 
@@ -1167,6 +1182,10 @@ class KonanBot:
         print("Score:", score)
         print("Tier:", tier)
         print("Connects:", job.connects_required)
+        if template_needed:
+            print("Template:", template_needed)
+        else:
+            print("Template: Custom (no matching template)")
         print("\nPROPOSAL (ready for mass apply):\n")
         print(proposal)
 
@@ -1186,7 +1205,16 @@ class KonanBot:
             
         elif decision == "2":
             # Add to review queue for later demo building
-            self.db.update_proposal_status(job.id, "approved_for_demo")
+            # Store template type for demo building later
+            if template_needed:
+                # Update job with template type
+                self.db.cursor.execute("""
+                    INSERT OR REPLACE INTO proposal_status (job_id, status, template_type, updated_at)
+                    VALUES (?, 'approved_for_demo', ?, ?)
+                """, (job.id, template_needed, datetime.utcnow().isoformat()))
+                self.db.conn.commit()
+            else:
+                self.db.update_proposal_status(job.id, "approved_for_demo")
             print("✓ Added to review queue - will build demo after approval")
             
         else:
@@ -1223,7 +1251,7 @@ def build_demo_for_job():
     db = Database()
     
     # Get jobs approved for demo
-    db.cursor.execute("SELECT job_id, title, description, status FROM proposal_status WHERE status='approved_for_demo'")
+    db.cursor.execute("SELECT job_id, title, description, status, template_type FROM proposal_status WHERE status='approved_for_demo'")
     jobs = db.cursor.fetchall()
     
     if not jobs:
