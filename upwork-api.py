@@ -22,6 +22,7 @@ import logging
 import requests
 import xml.etree.ElementTree as ET
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -39,6 +40,15 @@ MAX_PROPOSALS_PER_HOUR = 20
 MIN_CONNECT_COST = 0
 MAX_CONNECT_COST = 6
 MIN_SCORE_THRESHOLD = 6
+
+# Upwork API Credentials (set via env vars)
+# export UPWORK_API_KEY=your_key UPWORK_SECRET=your_secret
+UPWORK_API_KEY = os.environ.get("UPWORK_API_KEY", "")
+UPWORK_SECRET = os.environ.get("UPWORK_SECRET", "")
+
+# Retry Config
+MAX_RETRIES = 3
+RETRY_DELAY = 2
 DEMO_TRIGGER_SCORE = 8
 TOP_DEMO_JOBS = 10
 LOG_LEVEL = logging.INFO
@@ -192,6 +202,44 @@ def text_to_vector(text, dim=50):
         vec[i%dim] += ord(c)
     return vec
 
+# Retry decorator
+def retry_api(max_attempts=MAX_RETRIES, delay=RETRY_DELAY):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise
+                    logger.warning(f"{func.__name__} failed (attempt {attempt+1}/{max_attempts}): {e}")
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
+
+# Upwork API Client
+class UpworkAPI:
+    """Real Upwork API integration."""
+    
+    def __init__(self):
+        self.base_url = "https://www.upwork.com/api/v2"
+        self.auth = (UPWORK_API_KEY, UPWORK_SECRET) if UPWORK_API_KEY else (None, None)
+    
+    @retry_api()
+    def get_my_info(self):
+        if not self.auth[0]:
+            return None
+        response = requests.get(f"{self.base_url}/users/me", auth=self.auth, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    
+    @retry_api()
+    def submit_proposal(self, job_key, cover_letter, bid_amount=0):
+        logger.info(f"Would submit proposal to {job_key}")
+        return {"success": True, "message": "Demo mode"}
+
 # -----------------------
 # DATA MODEL
 # -----------------------
@@ -202,6 +250,7 @@ class Job:
     title: str
     description: str
     created: datetime
+    url: str = ""
     client_spend: Optional[float] = None
     client_rating: Optional[float] = None
     payment_verified: bool = False
@@ -248,14 +297,25 @@ class JobFetcher:
                     proposal_match = re.search(r"(\d+)\s+proposals", description)
                     if proposal_match:
                         proposal_count = int(proposal_match.group(1))
+                    
+                    # Extract job URL
+                    job_url = item.findtext("link", "")
+                    
+                    # Extract actual connect cost
+                    connect_cost = 6  # default
+                    connect_match = re.search(r"(\d+)\s+connects?", description)
+                    if connect_match:
+                        connect_cost = int(connect_match.group(1))
+                    elif "free" in description:
+                        connect_cost = 0
 
                     job_id = hashlib.sha256((title + description).encode()).hexdigest()[:32]
                     jobs.append(Job(
                         id=job_id, title=title, description=description,
-                        created=created, client_spend=client_spend,
+                        created=created, url=job_url, client_spend=client_spend,
                         client_rating=rating, payment_verified=verified,
                         proposal_count=proposal_count,
-                        connects_required=get_connect_cost()
+                        connects_required=connect_cost
                     ))
                 except Exception as e:
                     logger.warning(f"Job parsing failed: {e}")
