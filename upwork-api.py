@@ -65,6 +65,9 @@ DEMO_TRIGGER_SCORE = 8
 # Discord webhook for alerts
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1475680076589830300/"
 
+# Templates folder
+TEMPLATES_DIR = "templates"
+
 LOG_LEVEL = logging.INFO
 
 TARGET_JOBS = {
@@ -507,10 +510,133 @@ class DiscordNotifier:
             logger.warning(f"Discord alert failed: {e}")
 
 # ---------------------------------------
+# TEMPLATE LOADER
+# ---------------------------------------
+
+class TemplateLoader:
+
+    def __init__(self, templates_dir=TEMPLATES_DIR):
+        self.templates_dir = templates_dir
+        self.templates = {}
+        self.load_templates()
+
+    def load_templates(self):
+        """Load all templates from the templates folder."""
+        if not os.path.exists(self.templates_dir):
+            logger.warning(f"Templates directory {self.templates_dir} not found")
+            return
+
+        for filename in os.listdir(self.templates_dir):
+            if filename.endswith('.md'):
+                template_name = filename[:-3]  # Remove .md
+                filepath = os.path.join(self.templates_dir, filename)
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    self.templates[template_name] = content
+                    logger.info(f"Loaded template: {template_name}")
+
+    def find_matching_template(self, job_title, job_description):
+        """Find best matching template based on keywords."""
+        text = (job_title + " " + job_description).lower()
+
+        best_match = None
+        best_score = 0
+
+        for template_name, content in self.templates.items():
+            # Extract keywords from template
+            keywords_section = content.split("## Category Keywords")[-1].split("---")[0] if "## Category Keywords" in content else ""
+
+            score = 0
+            for keyword in keywords_section.split('\n'):
+                keyword = keyword.strip('- ').strip()
+                if keyword and keyword in text:
+                    score += 1
+
+            if score > best_score:
+                best_score = score
+                best_match = template_name
+
+        return best_match, best_score
+
+    def get_short_template(self, template_name):
+        """Get the short version (for proposals)."""
+        if template_name not in self.templates:
+            return None
+
+        content = self.templates[template_name]
+
+        # Extract SHORT VERSION section
+        if "## SHORT VERSION" in content:
+            short = content.split("## SHORT VERSION")[-1].split("## LONG VERSION")[0]
+            return short.strip()
+
+        return content  # Fallback to full content
+
+    def personalize_template(self, template_name, job_title, job_description):
+        """Personalize template with job-specific details."""
+        template = self.get_short_template(template_name)
+
+        if not template:
+            return None
+
+        # Extract job-specific details
+        details = self.extract_details(job_title, job_description)
+
+        # Replace placeholders
+        personalized = template
+        for key, value in details.items():
+            personalized = personalized.replace(f"[CUSTOMIZE: {key}]", value)
+
+        # Remove any remaining [CUSTOMIZE: ...] placeholders
+        personalized = re.sub(r'\[CUSTOMIZE: [^\]]+\]', '[Your specifics here]', personalized)
+
+        return personalized
+
+    def extract_details(self, job_title, job_description):
+        """Extract specific details from job to customize template."""
+        text = (job_title + " " + job_description).lower()
+
+        details = {}
+
+        # Extract industry/target
+        industries = ['saas', 'tech', 'healthcare', 'finance', 'real estate', 'e-commerce', 'marketing', 'startup']
+        for ind in industries:
+            if ind in text:
+                details['industry/target audience'] = ind
+                break
+
+        # Extract company size
+        if 'enterprise' in text or '500+' in text:
+            details['company size'] = 'enterprise (500+)'
+        elif '100-500' in text:
+            details['company size'] = 'mid-market (100-500)'
+        elif '50-100' in text:
+            details['company size'] = 'SMB (50-100)'
+
+        # Extract tools mentioned
+        tools = ['salesforce', 'hubspot', 'linkedin', 'zoominfo', 'clearbit', 'hunter', 'apollo']
+        found_tools = [t for t in tools if t in text]
+        if found_tools:
+            details['tools mentioned'] = ', '.join(found_tools)
+
+        # Extract deliverable format
+        if 'csv' in text:
+            details['deliverable format'] = 'CSV'
+        if 'google sheet' in text:
+            details['deliverable format'] = 'Google Sheets'
+        if 'airtable' in text:
+            details['deliverable format'] = 'Airtable'
+
+        return details
+
+# ---------------------------------------
 # PROPOSAL PERSONALIZATION AGENT
 # ---------------------------------------
 
 class ProposalAgent:
+
+    # Template loader instance
+    template_loader = TemplateLoader()
 
     @staticmethod
     def extract_problem(description):
@@ -525,7 +651,30 @@ class ProposalAgent:
 
     @staticmethod
     def generate(job, keyword):
+        """Generate proposal - tries template first, falls back to generic."""
 
+        # Try to find matching template
+        template_name, match_score = ProposalAgent.template_loader.find_matching_template(
+            job.title, job.description
+        )
+
+        if template_name and match_score > 0:
+            # Use template
+            proposal = ProposalAgent.template_loader.personalize_template(
+                template_name, job.title, job.description
+            )
+
+            # Add custom question based on job
+            problem = ProposalAgent.extract_problem(job.description)
+            question = ProposalAgent.generate_question(job.description)
+
+            if question and question not in proposal:
+                proposal += f"\n\n{question}"
+
+            logger.info(f"Using template: {template_name} (score: {match_score})")
+            return proposal
+
+        # Fallback to generic proposal
         problem = ProposalAgent.extract_problem(job.description)
 
         proposal = f"""
@@ -542,7 +691,7 @@ My approach would be:
 2. Build a clean working solution for the task
 3. Deliver structured output ready for use
 
-I’ve handled similar work involving {keyword} automation and data workflows.
+I've handled similar work involving {keyword} automation and data workflows.
 
 Quick question:
 Do you mainly want a one-time task completed, or something reusable long-term?
@@ -551,6 +700,44 @@ Best,
 """
 
         return proposal.strip()
+
+    @staticmethod
+    def generate_question(description):
+        """Generate a specific question based on job description."""
+        text = description.lower()
+
+        questions = []
+
+        # Industry-specific questions
+        if 'saas' in text or 'software' in text:
+            questions.append("What's your current stack and what gaps are you trying to fill?")
+        if 'healthcare' in text:
+            questions.append("What compliance requirements (HIPAA, etc.) should we be aware of?")
+        if 'real estate' in text:
+            questions.append("What MLS systems are you currently using?")
+        if 'finance' in text or 'fintech' in text:
+            questions.append("What data sources are most important for your analysis?")
+
+        # Deliverable-specific questions
+        if 'csv' in text or 'spreadsheet' in text:
+            questions.append("What specific fields do you need in the output?")
+        if 'automation' in text or 'zapier' in text:
+            questions.append("What triggers and actions should the automation include?")
+        if 'email' in text or 'outreach' in text:
+            questions.append("What's your current email deliverability setup?")
+
+        # Scope questions
+        if 'ongoing' in text or 'month' in text:
+            questions.append("What's your expected volume per month?")
+        if 'urgent' in text or 'asap' in text:
+            questions.append("When is your deadline for the initial deliverable?")
+
+        # Return a random question if we found any
+        if questions:
+            import random
+            return random.choice(questions)
+
+        return None
 
 # ---------------------------------------
 # KONAN BOT
