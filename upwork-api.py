@@ -1212,12 +1212,13 @@ class KonanBot:
 
 # ---------------------------------------
 # DEMO BUILDER COMMAND
-# For approved jobs - builds actual demos
+# For approved jobs - builds actual demos with full skill execution
 # ---------------------------------------
 
 def build_demo_for_job():
-    """Build demo for a job in the review queue."""
+    """Build ENHANCED demo for a job in the review queue."""
     from demo_builder import create_demo
+    from enhanced_demo_builder import build_enhanced_demo
     
     db = Database()
     
@@ -1242,21 +1243,41 @@ def build_demo_for_job():
         print("Invalid choice")
         return
     
-    print(f"\nBuilding demo for: {title}")
+    print(f"\nBuilding ENHANCED demo for: {title}")
+    print("Using template + skills for full execution...\n")
     
-    # Build demo using skills + template
-    result = create_demo(title, description)
+    # First get basic demo type
+    basic_result = create_demo(title, description)
+    demo_type = basic_result.get("demo_type", "lead_generation")
     
-    print(f"\n✓ Demo built!")
-    print(f"Type: {result.get('demo_type')}")
-    print(f"File: {result.get('filepath')}")
-    print(f"Description: {result.get('description')}")
-    
-    # Update status
-    db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
-    db.conn.commit()
-    
-    print("\nDemo ready for your review!")
+    # Build ENHANCED demo with actual skill execution
+    try:
+        result = build_enhanced_demo(demo_type, title, description)
+        
+        print(f"\n✓ ENHANCED Demo built!")
+        print(f"Type: {result.get('demo_type')}")
+        print(f"Files: {result.get('files')}")
+        print(f"Improvements applied: {result.get('improvements')}")
+        print(f"Description: {result.get('description')}")
+        
+        # Update status
+        db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
+        db.conn.commit()
+        
+        print("\nDemo ready for your review!")
+        
+    except Exception as e:
+        print(f"Enhanced demo failed: {e}")
+        print("Falling back to basic demo...")
+        
+        result = create_demo(title, description)
+        
+        print(f"\n✓ Basic Demo built!")
+        print(f"Type: {result.get('demo_type')}")
+        print(f"File: {result.get('filepath')}")
+        
+        db.cursor.execute("UPDATE proposal_status SET status='demo_ready' WHERE job_id=?", (job_id,))
+        db.conn.commit()
 
 
 # ---------------------------------------
