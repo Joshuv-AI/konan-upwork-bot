@@ -855,6 +855,19 @@ class TemplateLoader:
         elif 'twitter' in text or 'x.com' in text:
             details['platform'] = 'Twitter/X'
 
+        # ==== Content Repurposing specific ====
+        repurp_keywords = ['repurpos', 'content repurpos', 'video repurpos', 'podcast', 'atomize', 'long-form']
+        if any(kw in text for kw in repurp_keywords):
+            details['service type'] = 'content repurposing'
+
+        # Content type
+        if 'video' in text or 'youtube' in text:
+            details['content type'] = 'video'
+        elif 'podcast' in text or 'audio' in text:
+            details['content type'] = 'audio'
+        elif 'blog' in text or 'article' in text:
+            details['content type'] = 'written'
+
         return details
 
 # ---------------------------------------
