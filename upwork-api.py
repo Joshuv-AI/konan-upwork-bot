@@ -868,6 +868,21 @@ class TemplateLoader:
         elif 'blog' in text or 'article' in text:
             details['content type'] = 'written'
 
+        # ==== PDF Services specific ====
+        pdf_keywords = ['pdf', 'ocr', 'document conversion', 'fillable form']
+        if any(kw in text for kw in pdf_keywords):
+            details['service type'] = 'pdf services'
+
+        # PDF service type
+        if 'conversion' in text or 'convert' in text:
+            details['pdf service'] = 'conversion'
+        elif 'ocr' in text or 'scanned' in text:
+            details['pdf service'] = 'ocr'
+        elif 'form' in text or 'fillable' in text:
+            details['pdf service'] = 'forms'
+        elif 'edit' in text:
+            details['pdf service'] = 'editing'
+
         return details
 
 # ---------------------------------------
