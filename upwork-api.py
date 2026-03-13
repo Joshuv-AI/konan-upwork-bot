@@ -840,6 +840,21 @@ class TemplateLoader:
         elif 'newsletter' in text:
             details['email type'] = 'newsletter'
 
+        # ==== Social Media specific ====
+        social_keywords = ['social media', 'instagram', 'tiktok', 'linkedin', 'twitter', 'facebook', 'content calendar', 'community']
+        if any(kw in text for kw in social_keywords):
+            details['service type'] = 'social media management'
+
+        # Platform
+        if 'instagram' in text:
+            details['platform'] = 'Instagram'
+        elif 'tiktok' in text:
+            details['platform'] = 'TikTok'
+        elif 'linkedin' in text:
+            details['platform'] = 'LinkedIn'
+        elif 'twitter' in text or 'x.com' in text:
+            details['platform'] = 'Twitter/X'
+
         return details
 
 # ---------------------------------------
