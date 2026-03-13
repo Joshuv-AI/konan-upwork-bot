@@ -41,7 +41,7 @@ MIN_SCORE_THRESHOLD = 6
 DEMO_TRIGGER_SCORE = 8
 TOP_DEMO_JOBS = 10
 LOG_LEVEL = logging.INFO
-DISCORD_WEBHOOK_URL = ""  # Add your webhook URL
+DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
 # 13 Target Keywords
 TARGET_JOBS = [
@@ -600,6 +600,33 @@ def upload_to_gist(folder, job_title):
     return None
 
 # -----------------------
+# DISCORD ALERTS
+# -----------------------
+
+def send_discord_alert(job_title, score, tier, status, connects):
+    """Send Discord alert for job actions."""
+    if not DISCORD_WEBHOOK_URL:
+        return
+    
+    colors = {"tier1": 3066993, "tier2": 3447003, "tier3": 15105570}
+    embeds = [{
+        "title": f"📋 Job Alert: {status}",
+        "description": job_title[:100],
+        "color": colors.get(tier, 0),
+        "fields": [
+            {"name": "Score", "value": f"{score}/10", "inline": True},
+            {"name": "Tier", "value": tier, "inline": True},
+            {"name": "Connects", "value": str(connects), "inline": True}
+        ],
+        "timestamp": datetime.utcnow().isoformat()
+    }]
+    
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": embeds}, timeout=5)
+    except:
+        pass
+
+# -----------------------
 # PROPOSAL AGENT
 # -----------------------
 
@@ -751,11 +778,17 @@ class KonanBot:
                     self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
                     self.proposals_sent_hour += 1
                     print("✓ Proposal submitted! Use --build-demo later to add demo.")
+                    # Discord alert
+                    send_discord_alert(job.title, score, tier, "Submitted", job.connects_required)
                 elif decision == "2":
                     self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
                     print("✓ Added to review queue")
+                    # Discord alert
+                    send_discord_alert(job.title, score, tier, "Queued", 0)
                 else:
-                    print("Skipped")
+                    # Save skipped jobs too (for deduplication)
+                    self.db.save_job(job, tier, score, ",".join(map(str, vector)), template_type)
+                    print("Skipped (saved for dedup)")
                     
             except Exception as e:
                 logger.error(f"Job submission failed: {e}")
