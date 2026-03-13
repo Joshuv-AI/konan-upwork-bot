@@ -48,8 +48,8 @@ UPWORK_SECRET = os.environ.get("UPWORK_SECRET", "")
 
 # Upwork Login Credentials (for scraping stats)
 # export UPWORK_EMAIL=your@email.com UPWORK_PASSWORD=your_password
-UPWORK_EMAIL = os.environ.get("UPWORK_EMAIL", "joshuaalmodovar@gmail.com")
-UPWORK_PASSWORD = os.environ.get("UPWORK_PASSWORD", "Ja06301998!")
+UPWORK_EMAIL = os.environ.get("UPWORK_EMAIL", "")
+UPWORK_PASSWORD = os.environ.get("UPWORK_PASSWORD", "")
 
 # Retry Config
 MAX_RETRIES = 3
