@@ -808,6 +808,25 @@ class TemplateLoader:
         elif 'api' in text or 'integration' in text:
             details['notion feature'] = 'API/integration'
 
+        # ==== QA Testing specific ====
+        qa_keywords = ['qa', 'testing', 'test', 'quality assurance', 'bug', 'test automation', 'manual testing']
+        if any(kw in text for kw in qa_keywords):
+            details['service type'] = 'qa testing'
+
+        # Testing type
+        if 'automation' in text or 'automated' in text:
+            details['testing type'] = 'test automation'
+        elif 'manual' in text:
+            details['testing type'] = 'manual testing'
+        elif 'performance' in text or 'load' in text:
+            details['testing type'] = 'performance testing'
+        elif 'security' in text or 'penetration' in text:
+            details['testing type'] = 'security testing'
+        elif 'mobile' in text or 'ios' in text or 'android' in text:
+            details['testing type'] = 'mobile testing'
+        elif 'api' in text:
+            details['testing type'] = 'api testing'
+
         return details
 
 # ---------------------------------------
