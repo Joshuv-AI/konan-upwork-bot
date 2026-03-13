@@ -31,15 +31,39 @@ from typing import List, Optional
 # CONFIG
 # ---------------------------------------
 
-UPWORK_RSS_URL = "https://www.upwork.com/ab/feed/jobs/rss?q=assistant"
+# Multiple RSS feeds for different keywords
+TARGET_KEYWORDS = [
+    "research assistant",
+    "lead generation",
+    "data scraping",
+    "content repurposing",
+    "cold outreach",
+    "virtual assistant",
+    "excel",
+    "google sheets",
+    "pdf",
+    "notion",
+    "data entry",
+    "email automation",
+    "social media",
+    "qa",
+    "webhook",
+]
+
+# Build RSS URLs for each keyword
+UPWORK_RSS_URLS = [f"https://www.upwork.com/ab/feed/jobs/rss?q={kw.replace(' ', '+')}" for kw in TARGET_KEYWORDS]
+
 DATABASE_FILE = "konan_agent.db"
 
 SCAN_INTERVAL = 600
 MAX_CONNECTS_PER_DAY = 120
-DEFAULT_CONNECT_COST = 12
+MAX_CONNECT_COST = 6  # Accept jobs costing 0-6 connects
 
 MIN_SCORE_THRESHOLD = 6
 DEMO_TRIGGER_SCORE = 8
+
+# Discord webhook for alerts
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1475680076589830300/"
 
 LOG_LEVEL = logging.INFO
 
@@ -96,7 +120,8 @@ class Database:
             score REAL,
             tier TEXT,
             connects INTEGER,
-            created_at TEXT
+            created_at TEXT,
+            status TEXT DEFAULT 'submitted'
         )
         """)
 
@@ -104,6 +129,15 @@ class Database:
         CREATE TABLE IF NOT EXISTS connect_spend(
             date TEXT PRIMARY KEY,
             connects_used INTEGER
+        )
+        """)
+
+        # Proposal status tracking
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS proposal_status(
+            job_id TEXT PRIMARY KEY,
+            status TEXT,
+            updated_at TEXT
         )
         """)
 
@@ -156,6 +190,15 @@ class Database:
 
         self.conn.commit()
 
+    def update_proposal_status(self, job_id, status):
+
+        self.cursor.execute("""
+        INSERT OR REPLACE INTO proposal_status
+        VALUES(?,?,?)
+        """, (job_id, status, datetime.utcnow().isoformat()))
+
+        self.conn.commit()
+
 # ---------------------------------------
 # DATA MODEL
 # ---------------------------------------
@@ -170,7 +213,7 @@ class Job:
     client_spend: Optional[float] = None
     client_rating: Optional[float] = None
     payment_verified: bool = False
-    connects_required: int = DEFAULT_CONNECT_COST
+    connects_required: int = MAX_CONNECT_COST
 
 # ---------------------------------------
 # JOB FETCHER (RSS optimized)
@@ -183,65 +226,70 @@ class JobFetcher:
 
         jobs: List[Job] = []
 
-        response = requests.get(UPWORK_RSS_URL, timeout=10)
+        # Fetch from all keyword RSS feeds
+        for rss_url in UPWORK_RSS_URLS:
+            try:
+                response = requests.get(rss_url, timeout=10)
+                rss = response.text
 
-        rss = response.text
+                items = rss.split("<item>")[1:]
 
-        items = rss.split("<item>")[1:]
+                for item in items:
 
-        for item in items:
+                    title_match = re.search("<title>(.*?)</title>", item)
+                    desc_match = re.search("<description>(.*?)</description>", item)
+                    pub_match = re.search("<pubDate>(.*?)</pubDate>", item)
 
-            title_match = re.search("<title>(.*?)</title>", item)
-            desc_match = re.search("<description>(.*?)</description>", item)
-            pub_match = re.search("<pubDate>(.*?)</pubDate>", item)
+                    if not title_match:
+                        continue
 
-            if not title_match:
-                continue
+                    title = title_match.group(1).lower()
+                    description = desc_match.group(1).lower() if desc_match else ""
 
-            title = title_match.group(1).lower()
-            description = desc_match.group(1).lower() if desc_match else ""
+                    created = datetime.utcnow()
 
-            created = datetime.utcnow()
+                    if pub_match:
+                        try:
+                            created = datetime.strptime(
+                                pub_match.group(1)[:25],
+                                "%a, %d %b %Y %H:%M:%S"
+                            )
+                        except:
+                            pass
 
-            if pub_match:
-                try:
-                    created = datetime.strptime(
-                        pub_match.group(1)[:25],
-                        "%a, %d %b %Y %H:%M:%S"
+                    client_spend = None
+                    rating = None
+                    verified = False
+
+                    spend_match = re.search(r"\$([0-9,]+)\s+spent", description)
+                    if spend_match:
+                        client_spend = float(spend_match.group(1).replace(",", ""))
+
+                    rating_match = re.search(r"([0-5]\.[0-9])\s+rating", description)
+                    if rating_match:
+                        rating = float(rating_match.group(1))
+
+                    if "payment verified" in description:
+                        verified = True
+
+                    job_id = hashlib.sha256(
+                        (title + description).encode()
+                    ).hexdigest()[:32]
+
+                    jobs.append(
+                        Job(
+                            job_id,
+                            title,
+                            description,
+                            created,
+                            client_spend,
+                            rating,
+                            verified,
+                            MAX_CONNECT_COST  # Max connects we're willing to use
+                        )
                     )
-                except:
-                    pass
-
-            client_spend = None
-            rating = None
-            verified = False
-
-            spend_match = re.search(r"\$([0-9,]+)\s+spent", description)
-            if spend_match:
-                client_spend = float(spend_match.group(1).replace(",", ""))
-
-            rating_match = re.search(r"([0-5]\.[0-9])\s+rating", description)
-            if rating_match:
-                rating = float(rating_match.group(1))
-
-            if "payment verified" in description:
-                verified = True
-
-            job_id = hashlib.sha256(
-                (title + description).encode()
-            ).hexdigest()[:32]
-
-            jobs.append(
-                Job(
-                    job_id,
-                    title,
-                    description,
-                    created,
-                    client_spend,
-                    rating,
-                    verified
-                )
-            )
+            except Exception as e:
+                logger.warning(f"Failed to fetch {rss_url}: {e}")
 
         return jobs
 
@@ -380,6 +428,85 @@ Files:
         return folder
 
 # ---------------------------------------
+# GIST UPLOADER (for demo sharing)
+# ---------------------------------------
+
+class GistUploader:
+
+    GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+
+    @staticmethod
+    def upload_demo(demo_folder):
+
+        if not GistUploader.GITHUB_TOKEN:
+            logger.warning("No GITHUB_TOKEN set, returning local folder")
+            return demo_folder
+
+        try:
+            files = {}
+            for filename in os.listdir(demo_folder):
+                filepath = os.path.join(demo_folder, filename)
+                if os.path.isfile(filepath):
+                    with open(filepath, 'r') as f:
+                        files[filename] = {"content": f.read()}
+
+            gist_data = {
+                "description": f"Demo for Upwork proposal - {datetime.now().date()}",
+                "public": False,
+                "files": files
+            }
+
+            response = requests.post(
+                "https://api.github.com/gists",
+                headers={
+                    "Authorization": f"token {GistUploader.GITHUB_TOKEN}",
+                    "Accept": "application/vnd.github+json"
+                },
+                json=gist_data
+            )
+
+            if response.status_code == 201:
+                return response.json()["html_url"]
+            else:
+                logger.warning(f"Gist upload failed: {response.status_code}")
+                return demo_folder
+
+        except Exception as e:
+            logger.warning(f"Gist upload error: {e}")
+            return demo_folder
+
+# ---------------------------------------
+# DISCORD NOTIFIER
+# ---------------------------------------
+
+class DiscordNotifier:
+
+    @staticmethod
+    def send_alert(job_title, score, tier, proposal_preview):
+
+        if not DISCORD_WEBHOOK_URL:
+            return
+
+        embed = {
+            "title": f"New Job Alert - {job_title[:50]}...",
+            "color": 3447003,  # Blue
+            "fields": [
+                {"name": "Score", "value": str(score), "inline": True},
+                {"name": "Tier", "value": tier, "inline": True},
+            ],
+            "footer": {"text": "Konan Upwork Bot"}
+        }
+
+        payload = {
+            "embeds": [embed]
+        }
+
+        try:
+            requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        except Exception as e:
+            logger.warning(f"Discord alert failed: {e}")
+
+# ---------------------------------------
 # PROPOSAL PERSONALIZATION AGENT
 # ---------------------------------------
 
@@ -463,17 +590,24 @@ class KonanBot:
             return
 
         demo_folder = None
+        demo_url = None
 
         if score >= DEMO_TRIGGER_SCORE:
             demo_folder = DemoGenerator.generate(job)
+            # Upload to GitHub Gist for sharing
+            demo_url = GistUploader.upload_demo(demo_folder)
 
         proposal = ProposalAgent.generate(job, keyword)
+
+        # Send Discord alert for high-tier jobs
+        if tier in ["tier1", "tier2"]:
+            DiscordNotifier.send_alert(job.title, score, tier, proposal[:100])
 
         print("\n--------------------------")
         print("JOB:", job.title)
         print("Score:", score)
         print("Tier:", tier)
-        print("Demo:", demo_folder)
+        print("Demo:", demo_url or demo_folder)
         print("\nPROPOSAL:\n")
         print(proposal)
 
@@ -482,6 +616,7 @@ class KonanBot:
         if decision.lower() == "y":
 
             self.db.add_connects(job.connects_required)
+            self.db.update_proposal_status(job.id, "submitted")
 
             print("Proposal submitted.")
 
