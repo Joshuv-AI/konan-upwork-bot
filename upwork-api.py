@@ -598,14 +598,14 @@ class TemplateLoader:
 
         details = {}
 
-        # Extract industry/target
+        # ==== Lead Generation specific ====
         industries = ['saas', 'tech', 'healthcare', 'finance', 'real estate', 'e-commerce', 'marketing', 'startup']
         for ind in industries:
             if ind in text:
                 details['industry/target audience'] = ind
                 break
 
-        # Extract company size
+        # Company size
         if 'enterprise' in text or '500+' in text:
             details['company size'] = 'enterprise (500+)'
         elif '100-500' in text:
@@ -613,19 +613,58 @@ class TemplateLoader:
         elif '50-100' in text:
             details['company size'] = 'SMB (50-100)'
 
-        # Extract tools mentioned
+        # Tools
         tools = ['salesforce', 'hubspot', 'linkedin', 'zoominfo', 'clearbit', 'hunter', 'apollo']
         found_tools = [t for t in tools if t in text]
         if found_tools:
             details['tools mentioned'] = ', '.join(found_tools)
 
-        # Extract deliverable format
+        # ==== Data Scraping specific ====
+        # Target website
+        url_match = re.search(r'(https?://[^\s]+|www\.[^\s]+)', job_title + " " + job_description)
+        if url_match:
+            details['target website'] = url_match.group(1)[:50]
+
+        # Data points needed
+        data_points = []
+        if 'email' in text:
+            data_points.append('emails')
+        if 'phone' in text or 'contact' in text:
+            data_points.append('phone numbers')
+        if 'company' in text:
+            data_points.append('company info')
+        if 'price' in text or 'cost' in text:
+            data_points.append('pricing')
+        if 'product' in text:
+            data_points.append('product details')
+        if data_points:
+            details['data points needed'] = ', '.join(data_points)
+
+        # Scraping type
+        if 'dynamic' in text or 'javascript' in text or 'js' in text:
+            details['site type'] = 'dynamic JavaScript site'
+        elif 'api' in text:
+            details['site type'] = 'API extraction'
+        else:
+            details['site type'] = 'standard website'
+
+        # Volume
+        if '1000' in text or '1k' in text:
+            details['expected volume'] = '1,000+ records'
+        elif '5000' in text or '5k' in text:
+            details['expected volume'] = '5,000+ records'
+        elif '10000' in text or '10k' in text:
+            details['expected volume'] = '10,000+ records'
+
+        # ==== Common deliverable format ====
         if 'csv' in text:
             details['deliverable format'] = 'CSV'
         if 'google sheet' in text:
             details['deliverable format'] = 'Google Sheets'
         if 'airtable' in text:
             details['deliverable format'] = 'Airtable'
+        if 'json' in text:
+            details['deliverable format'] = 'JSON'
 
         return details
 
